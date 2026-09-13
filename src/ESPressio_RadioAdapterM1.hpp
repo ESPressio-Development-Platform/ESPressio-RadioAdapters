@@ -82,7 +82,8 @@ struct RadioAdapterM1TransportBinding final {
     void* Owner=nullptr;
     bool (*Reserve)(void*,Adapters::AdapterRecordIdentity,Adapters::AdapterRouteToken,std::uint64_t&) noexcept=nullptr;
     void (*Cancel)(void*,std::uint64_t) noexcept=nullptr;
-    constexpr explicit operator bool()const noexcept{return Owner&&Reserve&&Cancel;}
+    void (*CancelRecord)(void*,Adapters::AdapterRecordIdentity) noexcept=nullptr;
+    constexpr explicit operator bool()const noexcept{return Owner&&Reserve&&Cancel&&CancelRecord;}
 };
 
 /// <summary>Fixed RadioAdapters receipt seam used by ingress without exposing controller storage.</summary>
@@ -129,7 +130,7 @@ class RadioAdapterM1Controller final : public Radio::IRadioRuntimeTransferResult
     Radio::IRadioRuntimeTransferResultSink* _downstream=nullptr;
     void* _completionOwner=nullptr;
     Adapters::AdapterSubmissionDisposition (*_complete)(void*,const Adapters::LowerTransportCompletion&) noexcept=nullptr;
-    System::Synchronization::Mutex _mutex;
+    mutable System::Synchronization::Mutex _mutex;
 
     static constexpr std::uint64_t SlotMask=0xffffULL;
     static constexpr std::uint64_t MaximumGeneration=(std::numeric_limits<std::uint64_t>::max()>>16u);
@@ -203,6 +204,9 @@ class RadioAdapterM1Controller final : public Radio::IRadioRuntimeTransferResult
     static void CancelThunk(void* owner,std::uint64_t token) noexcept {
         static_cast<RadioAdapterM1Controller*>(owner)->Cancel(token);
     }
+    static void CancelRecordThunk(void* owner,Adapters::AdapterRecordIdentity record) noexcept {
+        static_cast<RadioAdapterM1Controller*>(owner)->CancelRecord(record);
+    }
     static bool HandleReceiptThunk(void* owner,Adapters::AdapterRouteToken route,
         Radio::RadioContentionDomainId domain,Radio::RadioTransferId transferId,
         Primitive::PrimitiveAdmissionDisposition admission) noexcept {
@@ -239,7 +243,8 @@ public:
             &RadioAdapterM1Controller::ReserveIssuedThunk,&RadioAdapterM1Controller::ReleaseIssuedThunk};
     }
     RadioAdapterM1TransportBinding TransportBinding() noexcept {
-        return {this,&RadioAdapterM1Controller::ReserveThunk,&RadioAdapterM1Controller::CancelThunk};
+        return {this,&RadioAdapterM1Controller::ReserveThunk,&RadioAdapterM1Controller::CancelThunk,
+            &RadioAdapterM1Controller::CancelRecordThunk};
     }
     RadioAdapterM1ReceiptBinding ReceiptBinding() noexcept {
         return {this,&RadioAdapterM1Controller::HandleReceiptThunk,&RadioAdapterM1Controller::SendReceiptThunk};
@@ -266,6 +271,17 @@ public:
         if(!DecodeToken(token,slot,generation)) return;
         auto& attempt=_attempts[slot];
         if(attempt.Occupied&&attempt.Generation==generation) ClearAttempt(attempt);
+    }
+
+    void CancelRecord(Adapters::AdapterRecordIdentity record) noexcept {
+        if(!record) return;
+        std::lock_guard<System::Synchronization::Mutex> lock(_mutex);
+        for(auto& attempt:_attempts){
+            if(attempt.Occupied&&attempt.Record==record){
+                ClearAttempt(attempt);
+                return;
+            }
+        }
     }
 
     void RadioLogicalTransferResolved(const Radio::RadioRuntimeTransferResult& result) noexcept override {
@@ -351,8 +367,7 @@ public:
     }
 
     std::size_t OutstandingAttempts() const noexcept {
-        auto& mutex=const_cast<System::Synchronization::Mutex&>(_mutex);
-        std::lock_guard<System::Synchronization::Mutex> lock(mutex);
+        std::lock_guard<System::Synchronization::Mutex> lock(_mutex);
         std::size_t count=0;for(const auto& attempt:_attempts)if(attempt.Occupied)++count;return count;
     }
 };

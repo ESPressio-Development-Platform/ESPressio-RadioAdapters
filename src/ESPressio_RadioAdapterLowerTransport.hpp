@@ -144,10 +144,7 @@ class RadioAdapterLowerTransport final {
 
     static void CancelThunk(void* owner,Adapters::AdapterRecordIdentity record) noexcept {
         auto& self=*static_cast<RadioAdapterLowerTransport*>(owner);
-        if(!self._m1) return;
-        (void)record;
-        // A2's retained cancellation callback does not carry the transport generation. Exact M1 slots are released by
-        // terminal result/receipt service or controller lifecycle; R9-11 owns shutdown-wide stale-attempt invalidation.
+        if(self._m1) self._m1.CancelRecord(self._m1.Owner,record);
     }
 
     static void QuiesceThunk(void* owner) noexcept {
