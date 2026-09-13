@@ -147,6 +147,7 @@ int main(){
     Runtime runtime;M1State m1State;
     const RadioAdapters::RadioAdapterM1ReceiptBinding m1{&m1State,&HandleReceipt,&SendReceipt};
     RadioAdapters::RadioAdapterReassemblyIngress<Table,Runtime,2,1> ingress(table,runtime,registry,provenance,m1);
+    assert(!ingress.IsQuiesced()&&ingress.LifecycleGeneration()==1);
 
     std::array<std::uint8_t,6> data{};
     assert(RadioAdapters::EncodeDirectRadioPrimitivePrefix(0x1234,1,data.data(),data.size()));
@@ -198,5 +199,40 @@ int main(){
 
     assert(ingress.AcceptedCount()==2);
     assert(ingress.RejectedCount()==3);
+
+    // Leave one receipt pending, then quiesce before the old A2 completion arrives.
+    m1State.AcceptHandle=true;
+    PutComplete(table,provider,source,destination,46,Radio::RadioServiceClass::Responsive,data.data(),data.size());
+    ingress.RadioReassemblyReady(provider,source,46,Radio::RadioServiceClass::Responsive);
+    assert(runtime.Calls==2&&runtime.Correlation!=0&&runtime.Completion);
+    const auto staleCompletion=runtime.Completion;
+    const auto staleCorrelation=runtime.Correlation;
+    const auto sendsBeforeQuiesce=m1State.Sends;
+
+    ingress.Quiesce();
+    assert(ingress.IsQuiesced()&&ingress.LifecycleGeneration()==1);
+
+    // A completed Radio reassembly delivered after quiesce is consumed/released but never enters old A2 or emits M1.
+    PutComplete(table,provider,source,destination,47,Radio::RadioServiceClass::Responsive,data.data(),data.size());
+    ingress.RadioReassemblyReady(provider,source,47,Radio::RadioServiceClass::Responsive);
+    assert(runtime.Calls==2&&m1State.Sends==sendsBeforeQuiesce);
+
+    Runtime replacementRuntime;
+    assert(ingress.Restart(replacementRuntime));
+    assert(!ingress.IsQuiesced()&&ingress.LifecycleGeneration()==2);
+
+    // Completion from lifecycle 1 carries a stale receipt-slot generation; it must not emit on lifecycle 2.
+    staleCompletion.Complete(staleCompletion.Owner,{staleCorrelation,
+        Primitive::PrimitiveAdmissionDisposition::Accepted,Adapters::AdapterEvidence::DestinationPrimitiveAdmission});
+    assert(m1State.Sends==sendsBeforeQuiesce);
+
+    PutComplete(table,provider,source,destination,48,Radio::RadioServiceClass::Responsive,data.data(),data.size());
+    ingress.RadioReassemblyReady(provider,source,48,Radio::RadioServiceClass::Responsive);
+    assert(replacementRuntime.Calls==1&&replacementRuntime.Correlation!=0&&replacementRuntime.Completion);
+    replacementRuntime.Complete(Primitive::PrimitiveAdmissionDisposition::AlreadyAccepted);
+    assert(m1State.Sends==sendsBeforeQuiesce+1);
+    assert(m1State.LastTransfer==48);
+    assert(m1State.LastAdmission==Primitive::PrimitiveAdmissionDisposition::AlreadyAccepted);
+
     return 0;
 }
