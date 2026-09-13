@@ -30,6 +30,11 @@ jobs:
           path: Radio
       - uses: actions/checkout@v4
         with:
+          repository: ESPressio-Development-Platform/ESPressio-Event
+          ref: primitives_redesign
+          path: Event
+      - uses: actions/checkout@v4
+        with:
           repository: ESPressio-Development-Platform/ESPressio-System
           ref: primitives_redesign
           path: System
@@ -40,9 +45,19 @@ jobs:
           path: Task
       - uses: actions/checkout@v4
         with:
+          repository: ESPressio-Development-Platform/ESPressio-Threads
+          ref: primitives_redesign
+          path: Threads
+      - uses: actions/checkout@v4
+        with:
           repository: ESPressio-Development-Platform/ESPressio-Timing
           ref: primitives_redesign
           path: Timing
+      - uses: actions/checkout@v4
+        with:
+          repository: ESPressio-Development-Platform/ESPressio-Serializable
+          ref: primitives_redesign
+          path: Serializable
       - uses: actions/checkout@v4
         with:
           repository: ESPressio-Development-Platform/ESPressio-Units
@@ -56,7 +71,7 @@ jobs:
       - name: Compile frozen binding and direct-Radio ingress contract
         run: >-
           g++ -std=c++17 -Wall -Wextra -Werror -fno-rtti
-          -IRadioAdapters/src -IAdapters/src -IPrimitive/src -IRadio/src -ISystem/src -ITask/src -ITiming/src -IUnits/src -IObservable/src
+          -IRadioAdapters/src -IAdapters/src -IPrimitive/src -IRadio/src -IEvent/src -ISystem/src -ITask/src -IThreads/src -ITiming/src -ISerializable/src -IUnits/src -IObservable/src
           RadioAdapters/tests/radio_adapter_ingress_test.cpp
           -o radio_adapter_ingress_test
       - name: Run frozen binding and direct-Radio ingress contract
@@ -64,7 +79,7 @@ jobs:
       - name: Compile direct-Radio exact M1 ingress integration contract
         run: >-
           g++ -std=c++17 -Wall -Wextra -Werror -fno-rtti
-          -IRadioAdapters/src -IAdapters/src -IPrimitive/src -IRadio/src -ISystem/src -ITask/src -ITiming/src -IUnits/src -IObservable/src
+          -IRadioAdapters/src -IAdapters/src -IPrimitive/src -IRadio/src -IEvent/src -ISystem/src -ITask/src -IThreads/src -ITiming/src -ISerializable/src -IUnits/src -IObservable/src
           RadioAdapters/tests/radio_adapter_m1_ingress_integration_test.cpp
           -o radio_adapter_m1_ingress_integration_test
       - name: Run direct-Radio exact M1 ingress integration contract
