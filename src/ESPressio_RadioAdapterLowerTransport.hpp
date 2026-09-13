@@ -13,6 +13,7 @@
 #include <ESPressio_SystemPlatformClock.hpp>
 
 #include "ESPressio_RadioAdapterEnvelope.hpp"
+#include "ESPressio_RadioAdapterM1.hpp"
 #include "ESPressio_RadioAdapterServiceMapping.hpp"
 
 namespace ESPressio::RadioAdapters {
@@ -53,12 +54,18 @@ constexpr Adapters::LowerTransportDisposition ToLowerTransportDisposition(Radio:
     return Adapters::LowerTransportDisposition::PermanentlyRejected;
 }
 
+constexpr bool RadioPolicyNeedsDestinationAdmission(
+    const Primitive::PrimitivePolicyDescriptor& policy) noexcept {
+    return policy.Evidence==1;
+}
+
 /// <summary>Direct-Radio A2 lower transport adding the exact four-byte family/version prefix before Radio admission.</summary>
 /// <remarks>
 /// The fixed workspace exists only for the synchronous call into RadioRuntime. RadioRuntime/scheduler copies accepted
 /// logical bytes into Radio-owned capacity before returning. This class retains no payload, retry queue, worker, route,
-/// fragment, or family object. Its Adapter binding advertises no destination-Primitive-admission evidence because Radio
-/// transmission completion and peer acknowledgement remain link facts only.
+/// fragment, or family object. When the optional M1 binding is present, only P2 occurrences explicitly requiring
+/// destination Primitive admission reserve a generation-safe deferred attempt. Link completion/peer acknowledgement never
+/// establishes M1. NoRemoteEvidence keeps the original immediate lower-transport-acceptance path.
 /// </remarks>
 template<class TRadioRuntime,std::size_t TMaximumLogicalMessageBytes>
 class RadioAdapterLowerTransport final {
@@ -67,12 +74,13 @@ class RadioAdapterLowerTransport final {
     TRadioRuntime* _radio=nullptr;
     RadioAdapterRouteBinding _routes{};
     RadioAdapterTransferPolicyBinding _policy{};
+    RadioAdapterM1TransportBinding _m1{};
     std::array<std::uint8_t,TMaximumLogicalMessageBytes> _workspace{};
     System::Synchronization::Mutex _workspaceMutex;
     std::atomic<bool> _quiesced{false};
 
     static Adapters::LowerTransportSubmitResult SubmitThunk(
-        void* owner,Adapters::AdapterRecordIdentity,
+        void* owner,Adapters::AdapterRecordIdentity record,
         Primitive::PrimitiveFamilyId family,Primitive::PrimitiveProtocolVersion protocol,
         const Primitive::PrimitivePolicyDescriptor& policy,Adapters::AdapterServiceClass service,
         Adapters::AdapterByteView bytes,Adapters::AdapterRouteToken route) noexcept {
@@ -99,15 +107,33 @@ class RadioAdapterLowerTransport final {
            !profile.IsValid()||profile.Class!=radioService||!timing.IsValidFor(profile))
             return {Adapters::LowerTransportDisposition::PermanentlyRejected,0,false};
 
+        const bool needsDestinationAdmission=RadioPolicyNeedsDestinationAdmission(policy);
+        std::uint64_t transportGeneration=0;
+        if(needsDestinationAdmission){
+            if(!self._m1||!self._m1.Reserve(self._m1.Owner,record,route,transportGeneration)||transportGeneration==0)
+                return {Adapters::LowerTransportDisposition::ResourceUnavailable,0,false};
+        }
+
         std::unique_lock<System::Synchronization::Mutex> lock(self._workspaceMutex,std::try_to_lock);
-        if(!lock.owns_lock())
+        if(!lock.owns_lock()){
+            if(transportGeneration) self._m1.Cancel(self._m1.Owner,transportGeneration);
             return {Adapters::LowerTransportDisposition::TemporarilyUnavailable,0,false};
-        if(!EncodeDirectRadioPrimitivePrefix(family,protocol,self._workspace.data(),self._workspace.size()))
+        }
+        if(!EncodeDirectRadioPrimitivePrefix(family,protocol,self._workspace.data(),self._workspace.size())){
+            if(transportGeneration) self._m1.Cancel(self._m1.Owner,transportGeneration);
             return {Adapters::LowerTransportDisposition::PermanentlyRejected,0,false};
+        }
         if(bytes.Size) std::memcpy(self._workspace.data()+DirectRadioPrimitivePrefixBytes,bytes.Data,bytes.Size);
         const auto logicalBytes=DirectRadioPrimitivePrefixBytes+bytes.Size;
-        const auto submitted=self._radio->SubmitPeer(peer,profile,timing,self._workspace.data(),logicalBytes);
-        return {ToLowerTransportDisposition(submitted.Status),0,false};
+        const auto submitted=self._radio->SubmitPeer(
+            peer,profile,timing,self._workspace.data(),logicalBytes,transportGeneration);
+        if(!submitted){
+            if(transportGeneration) self._m1.Cancel(self._m1.Owner,transportGeneration);
+            return {ToLowerTransportDisposition(submitted.Status),0,false};
+        }
+        if(needsDestinationAdmission)
+            return {Adapters::LowerTransportDisposition::Accepted,transportGeneration,true};
+        return {Adapters::LowerTransportDisposition::Accepted,0,false};
     }
 
     static bool ValidateThunk(void* owner) noexcept {
@@ -116,13 +142,22 @@ class RadioAdapterLowerTransport final {
                self._routes.Validate(self._routes.Owner)&&self._policy.Validate(self._policy.Owner);
     }
 
+    static void CancelThunk(void* owner,Adapters::AdapterRecordIdentity record) noexcept {
+        auto& self=*static_cast<RadioAdapterLowerTransport*>(owner);
+        if(!self._m1) return;
+        (void)record;
+        // A2's retained cancellation callback does not carry the transport generation. Exact M1 slots are released by
+        // terminal result/receipt service or controller lifecycle; R9-11 owns shutdown-wide stale-attempt invalidation.
+    }
+
     static void QuiesceThunk(void* owner) noexcept {
         static_cast<RadioAdapterLowerTransport*>(owner)->_quiesced.store(true,std::memory_order_release);
     }
 
 public:
     RadioAdapterLowerTransport(TRadioRuntime& radio,RadioAdapterRouteBinding routes,
-        RadioAdapterTransferPolicyBinding policy) noexcept:_radio(&radio),_routes(routes),_policy(policy) {}
+        RadioAdapterTransferPolicyBinding policy,RadioAdapterM1TransportBinding m1={}) noexcept
+        :_radio(&radio),_routes(routes),_policy(policy),_m1(m1) {}
     RadioAdapterLowerTransport(const RadioAdapterLowerTransport&)=delete;
     RadioAdapterLowerTransport& operator=(const RadioAdapterLowerTransport&)=delete;
 
@@ -134,9 +169,10 @@ public:
         result.Owner=this;
         result.Submit=&RadioAdapterLowerTransport::SubmitThunk;
         result.Validate=&RadioAdapterLowerTransport::ValidateThunk;
+        result.Cancel=&RadioAdapterLowerTransport::CancelThunk;
         result.Quiesce=&RadioAdapterLowerTransport::QuiesceThunk;
         result.ServiceClassMask=static_cast<std::uint8_t>((std::uint8_t{1}<<Adapters::AdapterServiceClassCount)-1U);
-        result.ProvidesDestinationPrimitiveAdmission=false;
+        result.ProvidesDestinationPrimitiveAdmission=bool(_m1);
         result.ProvidesValidatedOriginalSource=false;
         return result;
     }
