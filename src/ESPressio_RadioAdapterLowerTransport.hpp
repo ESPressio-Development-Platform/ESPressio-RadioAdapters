@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -24,13 +25,7 @@ struct RadioAdapterRouteBinding final {
     constexpr explicit operator bool() const noexcept { return Owner&&Resolve&&Validate; }
 };
 
-/// <summary>
-/// Fixed composition policy translating one immutable P2 occurrence into Radio-local finite service/timing requirements.
-/// </summary>
-/// <remarks>
-/// This resolver owns no pursuit state. It is called for each A2 logical attempt and must return finite Radio timing.
-/// RadioAdapters does not invent universal transport lifetimes, deadline promotion, or peer-ack requirements.
-/// </remarks>
+/// <summary>Fixed composition policy translating one immutable P2 occurrence into Radio-local finite service/timing requirements.</summary>
 struct RadioAdapterTransferPolicyBinding final {
     void* Owner=nullptr;
     bool (*Resolve)(void*,Primitive::PrimitiveFamilyId,Primitive::PrimitiveProtocolVersion,
@@ -58,14 +53,12 @@ constexpr Adapters::LowerTransportDisposition ToLowerTransportDisposition(Radio:
     return Adapters::LowerTransportDisposition::PermanentlyRejected;
 }
 
-/// <summary>
-/// Direct-Radio A2 lower transport. It adds the exact four-byte family/version prefix and submits one logical transfer.
-/// </summary>
+/// <summary>Direct-Radio A2 lower transport adding the exact four-byte family/version prefix before Radio admission.</summary>
 /// <remarks>
 /// The fixed workspace exists only for the synchronous call into RadioRuntime. RadioRuntime/scheduler copies accepted
 /// logical bytes into Radio-owned capacity before returning. This class retains no payload, retry queue, worker, route,
-/// fragment, or family object. Its Adapter binding deliberately advertises no destination-Primitive-admission evidence:
-/// Radio transmission completion and peer acknowledgement are link facts only.
+/// fragment, or family object. Its Adapter binding advertises no destination-Primitive-admission evidence because Radio
+/// transmission completion and peer acknowledgement remain link facts only.
 /// </remarks>
 template<class TRadioRuntime,std::size_t TMaximumLogicalMessageBytes>
 class RadioAdapterLowerTransport final {
@@ -76,7 +69,7 @@ class RadioAdapterLowerTransport final {
     RadioAdapterTransferPolicyBinding _policy{};
     std::array<std::uint8_t,TMaximumLogicalMessageBytes> _workspace{};
     System::Synchronization::Mutex _workspaceMutex;
-    bool _quiesced=false;
+    std::atomic<bool> _quiesced{false};
 
     static Adapters::LowerTransportSubmitResult SubmitThunk(
         void* owner,Adapters::AdapterRecordIdentity,
@@ -84,7 +77,7 @@ class RadioAdapterLowerTransport final {
         const Primitive::PrimitivePolicyDescriptor& policy,Adapters::AdapterServiceClass service,
         Adapters::AdapterByteView bytes,Adapters::AdapterRouteToken route) noexcept {
         auto& self=*static_cast<RadioAdapterLowerTransport*>(owner);
-        if(self._quiesced||self._radio==nullptr||!self._routes||!self._policy)
+        if(self._quiesced.load(std::memory_order_acquire)||self._radio==nullptr||!self._routes||!self._policy)
             return {Adapters::LowerTransportDisposition::PermanentlyRejected,0,false};
         if(bytes.Size&&bytes.Data==nullptr)
             return {Adapters::LowerTransportDisposition::PermanentlyRejected,0,false};
@@ -95,8 +88,8 @@ class RadioAdapterLowerTransport final {
         if(!route||!self._routes.Resolve(self._routes.Owner,route,peer)||!peer)
             return {Adapters::LowerTransportDisposition::PermanentlyRejected,0,false};
 
-        Radio::RadioServiceClass radioService{};
-        if(!TryToRadioServiceClass(service,radioService))
+        const auto radioService=ToRadioServiceClass(service);
+        if(!Radio::IsValidRadioServiceClass(radioService))
             return {Adapters::LowerTransportDisposition::PermanentlyRejected,0,false};
 
         const auto now=System::Clock::Monotonic().NowNanoseconds();
@@ -119,11 +112,13 @@ class RadioAdapterLowerTransport final {
 
     static bool ValidateThunk(void* owner) noexcept {
         auto& self=*static_cast<RadioAdapterLowerTransport*>(owner);
-        return !self._quiesced&&self._radio!=nullptr&&self._radio->IsRunning()&&self._routes&&self._policy&&
+        return !self._quiesced.load(std::memory_order_acquire)&&self._radio!=nullptr&&self._radio->IsRunning()&&self._routes&&self._policy&&
                self._routes.Validate(self._routes.Owner)&&self._policy.Validate(self._policy.Owner);
     }
 
-    static void QuiesceThunk(void* owner) noexcept { static_cast<RadioAdapterLowerTransport*>(owner)->_quiesced=true; }
+    static void QuiesceThunk(void* owner) noexcept {
+        static_cast<RadioAdapterLowerTransport*>(owner)->_quiesced.store(true,std::memory_order_release);
+    }
 
 public:
     RadioAdapterLowerTransport(TRadioRuntime& radio,RadioAdapterRouteBinding routes,
