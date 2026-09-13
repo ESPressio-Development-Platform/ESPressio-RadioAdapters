@@ -23,7 +23,7 @@ public:
     Radio::RadioProviderResourceProfile ProviderResources() const noexcept override { return {}; }
     bool IsTransmitReady() const noexcept override { return true; }
     Radio::RadioTransmissionCost EstimateTransmissionCost(
-        const Radio::RadioAddress&,std::size_t,const Radio::RadioServiceProfile&) const noexcept override {
+        const Radio::RadioAddress&,std::size_t,const Radio::RadioServiceProfile&) const noexcept {
         return {1,1,Radio::RadioCostEstimateQuality::ConservativeAirtime};
     }
     Radio::RadioSendResult Send(const Radio::RadioAddress&,const std::uint8_t*,std::size_t) noexcept override {
@@ -37,13 +37,15 @@ public:
 struct PolicyContext { bool malformed=false; };
 
 RadioAdapters::RadioAdapterBindingResolutionStatus ResolvePolicy(
-    void* owner,Primitive::PrimitiveProtocolVersion protocol,Adapters::AdapterByteView bytes,
-    Primitive::PrimitivePolicyDescriptor& policy) noexcept {
+    void* owner,Primitive::PrimitiveProtocolVersion protocol,Adapters::AdapterServiceClass service,
+    Adapters::AdapterByteView bytes,Primitive::PrimitivePolicyDescriptor& policy) noexcept {
     auto& context=*static_cast<PolicyContext*>(owner);
     if(context.malformed || bytes.Data==nullptr || bytes.Size==0)
         return RadioAdapters::RadioAdapterBindingResolutionStatus::Malformed;
     if(protocol!=1 || bytes.Data[0]==0xFE)
         return RadioAdapters::RadioAdapterBindingResolutionStatus::Unsupported;
+    if(service!=Adapters::AdapterServiceClass::Critical)
+        return RadioAdapters::RadioAdapterBindingResolutionStatus::Rejected;
     policy={};
     policy.Category=1;
     policy.Evidence=0;
@@ -102,7 +104,7 @@ int main(){
     binding.ResolvePolicy=&ResolvePolicy;
     assert(registry.Bind(binding)==Adapters::AdapterRuntimeStatus::Success);
     assert(registry.Bind(binding)==Adapters::AdapterRuntimeStatus::DuplicateFamily);
-    assert(registry.Find(0x1234,1)==nullptr); // not visible until frozen
+    assert(registry.Find(0x1234,1)==nullptr);
     assert(registry.Freeze()==Adapters::AdapterRuntimeStatus::Success);
     assert(registry.Find(0x1234,1)!=nullptr);
     assert(registry.Find(0x1234,2)==nullptr);
@@ -128,11 +130,16 @@ int main(){
     assert(runtime.Service==Adapters::AdapterServiceClass::Critical);
     assert(runtime.Size==2 && runtime.Bytes[0]==0xAA && runtime.Bytes[1]==0xBB);
     assert(runtime.Provenance.ImmediatePeer.Token==0x11223344ULL);
-    assert(!runtime.Provenance.OriginalSource); // trusted physical peer is not semantic-source proof
+    assert(!runtime.Provenance.OriginalSource);
     assert(runtime.Route.Value==0x55667788ULL);
     assert(runtime.Policy.Category==1 && runtime.Policy.MaximumAttempts==1);
 
     runtime.Called=false;
+    disposition=RadioAdapters::AdmitDirectRadioLogicalMessage(
+        runtime,registry,provenance,radio,source,Radio::RadioServiceClass::BestEffort,
+        {message.data(),message.size()});
+    assert(disposition==Adapters::AdapterSubmissionDisposition::Rejected && !runtime.Called);
+
     disposition=RadioAdapters::AdmitDirectRadioLogicalMessage(
         runtime,registry,provenance,radio,source,Radio::RadioServiceClass::Critical,
         {message.data(),3});
