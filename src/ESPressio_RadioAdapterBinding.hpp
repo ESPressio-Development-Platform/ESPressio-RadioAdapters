@@ -22,10 +22,11 @@ enum class RadioAdapterBindingResolutionStatus : std::uint8_t {
     TemporarilyUnavailable
 };
 
-/// <summary>Fixed per-family policy resolver. It may inspect only the immutable family representation supplied for this call.</summary>
+/// <summary>Fixed per-family policy resolver. It may inspect only the immutable family representation and neutral service supplied for this call.</summary>
 using RadioAdapterPolicyResolverThunk=RadioAdapterBindingResolutionStatus(*)(
     void*,
     Primitive::PrimitiveProtocolVersion,
+    Adapters::AdapterServiceClass,
     Adapters::AdapterByteView,
     Primitive::PrimitivePolicyDescriptor&) noexcept;
 
