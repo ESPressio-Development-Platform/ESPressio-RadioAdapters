@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -83,6 +84,8 @@ struct RadioAdapterM1TransportBinding final {
     bool (*Reserve)(void*,Adapters::AdapterRecordIdentity,Adapters::AdapterRouteToken,std::uint64_t&) noexcept=nullptr;
     void (*Cancel)(void*,std::uint64_t) noexcept=nullptr;
     void (*CancelRecord)(void*,Adapters::AdapterRecordIdentity) noexcept=nullptr;
+    void (*Quiesce)(void*) noexcept=nullptr;
+    std::uint64_t (*LifecycleGeneration)(void*) noexcept=nullptr;
     constexpr explicit operator bool()const noexcept{return Owner&&Reserve&&Cancel&&CancelRecord;}
 };
 
@@ -104,11 +107,21 @@ struct RadioAdapterM1ReceiptBinding final {
 /// transfer identifiers while destination evidence is outstanding, stores at most one pending A2 completion per attempt,
 /// and never invokes A2 from a Radio callback. Radio/result callbacks only publish bounded slot state and a wake; the
 /// composition later calls ServiceOne() after the A2 outbound quantum has had an opportunity to retain its record.
-/// No retry policy, payload bytes, Primitive object, fragmentation state, task or unbounded allocation is owned here.
+///
+/// R9-11 gives this transport correlation owner an explicit finite lifecycle. BindAdapterRuntime() starts exactly one
+/// non-zero lifecycle generation after a prior Quiesce(); Quiesce() rejects new reservations, clears every volatile
+/// attempt and detaches the old A2 completion target. Scheduler-issued transfer ids are retained in a fixed recent-id
+/// exclusion window so a replacement Radio scheduler that restarts its local uint16 issuer cannot immediately alias a
+/// delayed terminal result/M1 receipt from the previous lifecycle. The window is bounded and allocation-free; active
+/// attempts are always protected independently of the recent window. No wire field, retry policy, task or heap state is
+/// added by this lifecycle contract.
 /// </remarks>
-template<class TRadioRuntime,std::size_t TMaximumAttempts>
+template<class TRadioRuntime,std::size_t TMaximumAttempts,
+         std::size_t TRecentTransferIds=TMaximumAttempts>
 class RadioAdapterM1Controller final : public Radio::IRadioRuntimeTransferResultSink {
     static_assert(TMaximumAttempts>0&&TMaximumAttempts<std::numeric_limits<std::uint16_t>::max());
+    static_assert(TRecentTransferIds>0,"M1 restart exclusion window must be finite and non-zero");
+
     struct Attempt final {
         bool Occupied{false};
         std::uint64_t Generation{0};
@@ -123,14 +136,24 @@ class RadioAdapterM1Controller final : public Radio::IRadioRuntimeTransferResult
         bool PendingHasAdmission{false};
     };
 
+    struct RecentTransferId final {
+        Radio::RadioContentionDomainId Domain{};
+        Radio::RadioTransferId TransferId{0};
+    };
+
     TRadioRuntime* _radio=nullptr;
     std::array<Attempt,TMaximumAttempts> _attempts{};
+    std::array<RecentTransferId,TRecentTransferIds> _recentTransferIds{};
+    std::size_t _recentTransferCursor=0;
     RadioAdapterM1ReceiptPolicyBinding _receiptPolicy{};
     RadioAdapterM1WakeTarget _wake{};
     Radio::IRadioRuntimeTransferResultSink* _downstream=nullptr;
     void* _completionOwner=nullptr;
     Adapters::AdapterSubmissionDisposition (*_complete)(void*,const Adapters::LowerTransportCompletion&) noexcept=nullptr;
     mutable System::Synchronization::Mutex _mutex;
+    std::atomic<bool> _active{false};
+    std::uint64_t _lifecycleGeneration=0;
+    std::atomic<std::uint64_t> _staleLifecycleSignals{0};
 
     static constexpr std::uint64_t SlotMask=0xffffULL;
     static constexpr std::uint64_t MaximumGeneration=(std::numeric_limits<std::uint64_t>::max()>>16u);
@@ -143,10 +166,27 @@ class RadioAdapterM1Controller final : public Radio::IRadioRuntimeTransferResult
         if(raw==0||raw>TMaximumAttempts) return false;
         slot=static_cast<std::size_t>(raw-1u);generation=token>>16u;return generation!=0;
     }
-    static void ClearAttempt(Attempt& attempt) noexcept {
+
+    bool IsRecentTransferIdLocked(Radio::RadioContentionDomainId domain,Radio::RadioTransferId id) const noexcept {
+        if(!domain||id==0) return true;
+        for(const auto& recent:_recentTransferIds)
+            if(recent.Domain==domain&&recent.TransferId==id) return true;
+        return false;
+    }
+
+    void RememberTransferIdLocked(Radio::RadioContentionDomainId domain,Radio::RadioTransferId id) noexcept {
+        if(!domain||id==0||IsRecentTransferIdLocked(domain,id)) return;
+        _recentTransferIds[_recentTransferCursor]={domain,id};
+        _recentTransferCursor=(_recentTransferCursor+1u)%_recentTransferIds.size();
+    }
+
+    void ClearAttemptLocked(Attempt& attempt) noexcept {
+        if(attempt.Occupied&&attempt.TransferAssigned)
+            RememberTransferIdLocked(attempt.Domain,attempt.TransferId);
         const auto generation=attempt.Generation;
         attempt={};attempt.Generation=generation;
     }
+
     void SignalWake() noexcept {if(_wake) _wake.Wake(_wake.Owner);}
 
     bool QueueCompletionLocked(
@@ -164,31 +204,40 @@ class RadioAdapterM1Controller final : public Radio::IRadioRuntimeTransferResult
         auto& self=*static_cast<RadioAdapterM1Controller*>(owner);
         std::unique_lock<System::Synchronization::Mutex> lock(self._mutex,std::try_to_lock);
         if(!lock.owns_lock()) return true;
+        if(self.IsRecentTransferIdLocked(domain,id)) return true;
         for(const auto& attempt:self._attempts)
             if(attempt.Occupied&&attempt.TransferAssigned&&attempt.Domain==domain&&attempt.TransferId==id) return true;
         return false;
     }
+
     static bool ReserveIssuedThunk(void* owner,Radio::RadioContentionDomainId domain,
         std::uint64_t correlation,Radio::RadioTransferId id) noexcept {
         auto& self=*static_cast<RadioAdapterM1Controller*>(owner);
         std::unique_lock<System::Synchronization::Mutex> lock(self._mutex,std::try_to_lock);
-        if(!lock.owns_lock()||!domain||id==0) return false;
+        if(!lock.owns_lock()||!self._active.load(std::memory_order_acquire)||!domain||id==0) return false;
         std::size_t slot=0;std::uint64_t generation=0;
         if(!DecodeToken(correlation,slot,generation)) return false;
         auto& attempt=self._attempts[slot];
-        if(!attempt.Occupied||attempt.Generation!=generation||attempt.TransferAssigned) return false;
+        if(!attempt.Occupied||attempt.Generation!=generation||attempt.TransferAssigned||
+           self.IsRecentTransferIdLocked(domain,id)) return false;
         for(std::size_t i=0;i<self._attempts.size();++i){
             if(i==slot) continue;
             const auto& other=self._attempts[i];
             if(other.Occupied&&other.TransferAssigned&&other.Domain==domain&&other.TransferId==id) return false;
         }
-        attempt.Domain=domain;attempt.TransferId=id;attempt.TransferAssigned=true;return true;
+        attempt.Domain=domain;attempt.TransferId=id;attempt.TransferAssigned=true;
+        // Reserve this id in the restart exclusion window immediately. Active-attempt matching remains independent,
+        // and ClearAttemptLocked refreshes it after long-lived attempts that outlast a full recent-window rotation.
+        self.RememberTransferIdLocked(domain,id);
+        return true;
     }
+
     static void ReleaseIssuedThunk(void* owner,Radio::RadioContentionDomainId domain,
         std::uint64_t correlation,Radio::RadioTransferId id) noexcept {
         auto& self=*static_cast<RadioAdapterM1Controller*>(owner);
         std::unique_lock<System::Synchronization::Mutex> lock(self._mutex,std::try_to_lock);
         if(!lock.owns_lock()) return;
+        self.RememberTransferIdLocked(domain,id);
         std::size_t slot=0;std::uint64_t generation=0;
         if(!DecodeToken(correlation,slot,generation)) return;
         auto& attempt=self._attempts[slot];
@@ -197,6 +246,7 @@ class RadioAdapterM1Controller final : public Radio::IRadioRuntimeTransferResult
             attempt.Domain={};attempt.TransferId=0;attempt.TransferAssigned=false;
         }
     }
+
     static bool ReserveThunk(void* owner,Adapters::AdapterRecordIdentity record,
         Adapters::AdapterRouteToken route,std::uint64_t& token) noexcept {
         return static_cast<RadioAdapterM1Controller*>(owner)->Reserve(record,route,token);
@@ -206,6 +256,12 @@ class RadioAdapterM1Controller final : public Radio::IRadioRuntimeTransferResult
     }
     static void CancelRecordThunk(void* owner,Adapters::AdapterRecordIdentity record) noexcept {
         static_cast<RadioAdapterM1Controller*>(owner)->CancelRecord(record);
+    }
+    static void QuiesceThunk(void* owner) noexcept {
+        static_cast<RadioAdapterM1Controller*>(owner)->Quiesce();
+    }
+    static std::uint64_t LifecycleGenerationThunk(void* owner) noexcept {
+        return static_cast<RadioAdapterM1Controller*>(owner)->LifecycleGeneration();
     }
     static bool HandleReceiptThunk(void* owner,Adapters::AdapterRouteToken route,
         Radio::RadioContentionDomainId domain,Radio::RadioTransferId transferId,
@@ -225,16 +281,56 @@ public:
     RadioAdapterM1Controller(const RadioAdapterM1Controller&)=delete;
     RadioAdapterM1Controller& operator=(const RadioAdapterM1Controller&)=delete;
 
+    /// <summary>Rebinds a replacement Radio runtime only while the previous transport lifecycle is quiesced.</summary>
+    bool RebindRadioRuntime(TRadioRuntime& radio) noexcept {
+        std::lock_guard<System::Synchronization::Mutex> lock(_mutex);
+        if(_active.load(std::memory_order_acquire)) return false;
+        _radio=&radio;
+        return true;
+    }
+
+    /// <summary>
+    /// Starts one finite M1 transport lifecycle and binds its current A2 completion owner.
+    /// A lifecycle generation never wraps; exhaustion fails closed rather than recreating a stale identity.
+    /// </summary>
     template<class TAdapterRuntime>
-    void BindAdapterRuntime(TAdapterRuntime& runtime) noexcept {
+    bool BindAdapterRuntime(TAdapterRuntime& runtime) noexcept {
+        std::lock_guard<System::Synchronization::Mutex> lock(_mutex);
+        if(_active.load(std::memory_order_acquire)||_lifecycleGeneration==std::numeric_limits<std::uint64_t>::max())
+            return false;
+        ++_lifecycleGeneration;
+        if(_lifecycleGeneration==0) return false;
         _completionOwner=&runtime;
         _complete=[](void* owner,const Adapters::LowerTransportCompletion& completion) noexcept {
             return static_cast<TAdapterRuntime*>(owner)->CompleteTransport(completion);
         };
+        _active.store(true,std::memory_order_release);
+        return true;
+    }
+
+    /// <summary>Ends the current lifecycle, retaining only bounded recent transfer-id exclusion history.</summary>
+    void Quiesce() noexcept {
+        _active.store(false,std::memory_order_release);
+        std::lock_guard<System::Synchronization::Mutex> lock(_mutex);
+        for(auto& attempt:_attempts)
+            if(attempt.Occupied) ClearAttemptLocked(attempt);
+        _completionOwner=nullptr;
+        _complete=nullptr;
+    }
+
+    bool IsActive() const noexcept { return _active.load(std::memory_order_acquire); }
+
+    std::uint64_t LifecycleGeneration() const noexcept {
+        std::lock_guard<System::Synchronization::Mutex> lock(_mutex);
+        return _lifecycleGeneration;
+    }
+
+    std::uint64_t StaleLifecycleSignals() const noexcept {
+        return _staleLifecycleSignals.load(std::memory_order_acquire);
     }
 
     bool IsValid() const noexcept {
-        return _radio!=nullptr&&_completionOwner!=nullptr&&_complete!=nullptr&&
+        return _active.load(std::memory_order_acquire)&&_radio!=nullptr&&_completionOwner!=nullptr&&_complete!=nullptr&&
             (!_receiptPolicy||_receiptPolicy.Validate(_receiptPolicy.Owner));
     }
 
@@ -244,16 +340,17 @@ public:
     }
     RadioAdapterM1TransportBinding TransportBinding() noexcept {
         return {this,&RadioAdapterM1Controller::ReserveThunk,&RadioAdapterM1Controller::CancelThunk,
-            &RadioAdapterM1Controller::CancelRecordThunk};
+            &RadioAdapterM1Controller::CancelRecordThunk,&RadioAdapterM1Controller::QuiesceThunk,
+            &RadioAdapterM1Controller::LifecycleGenerationThunk};
     }
     RadioAdapterM1ReceiptBinding ReceiptBinding() noexcept {
         return {this,&RadioAdapterM1Controller::HandleReceiptThunk,&RadioAdapterM1Controller::SendReceiptThunk};
     }
 
     bool Reserve(Adapters::AdapterRecordIdentity record,Adapters::AdapterRouteToken route,std::uint64_t& token) noexcept {
-        token=0;if(!record||!route) return false;
+        token=0;if(!record||!route||!_active.load(std::memory_order_acquire)) return false;
         std::unique_lock<System::Synchronization::Mutex> lock(_mutex,std::try_to_lock);
-        if(!lock.owns_lock()) return false;
+        if(!lock.owns_lock()||!_active.load(std::memory_order_relaxed)) return false;
         for(std::size_t i=0;i<_attempts.size();++i){
             auto& attempt=_attempts[i];
             if(attempt.Occupied) continue;
@@ -270,7 +367,7 @@ public:
         std::size_t slot=0;std::uint64_t generation=0;
         if(!DecodeToken(token,slot,generation)) return;
         auto& attempt=_attempts[slot];
-        if(attempt.Occupied&&attempt.Generation==generation) ClearAttempt(attempt);
+        if(attempt.Occupied&&attempt.Generation==generation) ClearAttemptLocked(attempt);
     }
 
     void CancelRecord(Adapters::AdapterRecordIdentity record) noexcept {
@@ -278,16 +375,24 @@ public:
         std::lock_guard<System::Synchronization::Mutex> lock(_mutex);
         for(auto& attempt:_attempts){
             if(attempt.Occupied&&attempt.Record==record){
-                ClearAttempt(attempt);
+                ClearAttemptLocked(attempt);
                 return;
             }
         }
     }
 
     void RadioLogicalTransferResolved(const Radio::RadioRuntimeTransferResult& result) noexcept override {
+        if(!_active.load(std::memory_order_acquire)){
+            _staleLifecycleSignals.fetch_add(1,std::memory_order_relaxed);
+            return;
+        }
         bool wake=false;
         {
             std::lock_guard<System::Synchronization::Mutex> lock(_mutex);
+            if(!_active.load(std::memory_order_relaxed)){
+                _staleLifecycleSignals.fetch_add(1,std::memory_order_relaxed);
+                return;
+            }
             for(auto& attempt:_attempts){
                 if(!attempt.Occupied||!attempt.TransferAssigned||attempt.Domain!=result.Domain||
                    attempt.TransferId!=result.Result.TransferId) continue;
@@ -303,9 +408,14 @@ public:
 
     bool HandleReceipt(Adapters::AdapterRouteToken route,Radio::RadioContentionDomainId domain,
         Radio::RadioTransferId transferId,Primitive::PrimitiveAdmissionDisposition admission) noexcept {
+        if(!_active.load(std::memory_order_acquire)){
+            _staleLifecycleSignals.fetch_add(1,std::memory_order_relaxed);
+            return false;
+        }
         bool wake=false;
         {
             std::lock_guard<System::Synchronization::Mutex> lock(_mutex);
+            if(!_active.load(std::memory_order_relaxed)) return false;
             for(auto& attempt:_attempts){
                 if(!attempt.Occupied||!attempt.TransferAssigned||attempt.Domain!=domain||attempt.TransferId!=transferId) continue;
                 if(attempt.Route.Value!=route.Value) return false;
@@ -320,7 +430,8 @@ public:
     bool SendReceipt(Radio::IRadio& provider,const Radio::RadioAddress& source,
         Radio::RadioTransferId transferId,Radio::RadioServiceClass inboundService,
         Primitive::PrimitiveAdmissionDisposition admission) noexcept {
-        if(_radio==nullptr||!_receiptPolicy||!source.IsValid()||source.IsBroadcast()||transferId==0) return false;
+        if(!_active.load(std::memory_order_acquire)||_radio==nullptr||!_receiptPolicy||
+           !source.IsValid()||source.IsBroadcast()||transferId==0) return false;
         Radio::RadioServiceProfile profile{};Radio::RadioTransferTiming timing{};
         const auto now=System::Clock::Monotonic().NowNanoseconds();
         if(!_receiptPolicy.Resolve(_receiptPolicy.Owner,inboundService,now,profile,timing)||
@@ -337,11 +448,13 @@ public:
 
     /// <summary>Attempts one pending deferred completion; no polling or retry loop is owned by the controller.</summary>
     Adapters::AdapterSubmissionDisposition ServiceOne() noexcept {
-        if(_complete==nullptr||_completionOwner==nullptr) return Adapters::AdapterSubmissionDisposition::InvalidConfiguration;
+        if(!_active.load(std::memory_order_acquire)||_complete==nullptr||_completionOwner==nullptr)
+            return Adapters::AdapterSubmissionDisposition::InvalidConfiguration;
         std::size_t selected=_attempts.size();
         Adapters::LowerTransportCompletion completion{};
         {
             std::lock_guard<System::Synchronization::Mutex> lock(_mutex);
+            if(!_active.load(std::memory_order_relaxed)) return Adapters::AdapterSubmissionDisposition::NotRunning;
             for(std::size_t i=0;i<_attempts.size();++i){
                 const auto& attempt=_attempts[i];
                 if(!attempt.Occupied||!attempt.PendingCompletion) continue;
@@ -361,7 +474,7 @@ public:
             std::lock_guard<System::Synchronization::Mutex> lock(_mutex);
             auto& attempt=_attempts[selected];
             if(attempt.Occupied&&attempt.Generation==(completion.TransportGeneration>>16u)&&attempt.PendingCompletion)
-                ClearAttempt(attempt);
+                ClearAttemptLocked(attempt);
         }
         return result;
     }
