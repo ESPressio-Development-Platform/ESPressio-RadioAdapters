@@ -6,3 +6,5 @@
 #include "ESPressio_RadioAdapterLowerTransport.hpp"
 #include "ESPressio_RadioAdapterM1.hpp"
 #include "ESPressio_RadioAdapterServiceMapping.hpp"
+#include "ESPressio_EventRadioAdapterBinding.hpp"
+#include "ESPressio_EventRadioAdapterOutboundTarget.hpp"
