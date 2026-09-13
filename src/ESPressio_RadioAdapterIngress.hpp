@@ -243,8 +243,9 @@ public:
         std::uint64_t receiptToken=0;
         if(_m1&&!ReservePending(completed.Record(),receiptToken)){
             const auto& record=completed.Record();
-            (void)_m1.Send(_m1.Owner,*record.Provider,record.Source,record.TransferId,record.Service,
-                Primitive::PrimitiveAdmissionDisposition::ResourceUnavailable);
+            if(_m1.Send(_m1.Owner,*record.Provider,record.Source,record.TransferId,record.Service,
+                Primitive::PrimitiveAdmissionDisposition::ResourceUnavailable))
+                _receiptsSent.fetch_add(1,std::memory_order_relaxed);
             completed.Reset();_rejected.fetch_add(1,std::memory_order_relaxed);return;
         }
 
