@@ -49,7 +49,7 @@ Adapters::AdapterSubmissionDisposition AdmitDirectRadioLogicalMessage(
     if(binding==nullptr) return Adapters::AdapterSubmissionDisposition::Unsupported;
 
     Adapters::AdapterServiceClass adapterService{};
-    if(!TryMapRadioServiceClass(radioService,adapterService))
+    if(!TryToAdapterServiceClass(radioService,adapterService))
         return Adapters::AdapterSubmissionDisposition::InvalidConfiguration;
 
     const Adapters::AdapterByteView familyBytes{
