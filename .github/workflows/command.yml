@@ -98,3 +98,13 @@ jobs:
           -o command_radio_adapter_m1_test -pthread
       - name: Run Command exact-M1 and response contract
         run: ./command_radio_adapter_m1_test
+      - name: Compile Command recovered-response contract
+        run: >-
+          g++ -std=c++17 -Wall -Wextra -Werror -fno-rtti
+          -IRadioAdapters/src -IAdapters/src -IPrimitive/src -IRadio/src -ICommand/src
+          -IPersistence/src -ISecurity/src -ISystem/src -ITask/src -ITask/tests
+          -IThreads/src -ITiming/src -ITiming/tests/stubs -ISerializable/src -IUnits/src -IObservable/src
+          RadioAdapters/tests/command_radio_adapter_recovered_response_test.cpp
+          -o command_radio_adapter_recovered_response_test -pthread
+      - name: Run Command recovered-response contract
+        run: ./command_radio_adapter_recovered_response_test
