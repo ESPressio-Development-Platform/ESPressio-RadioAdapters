@@ -40,6 +40,11 @@ jobs:
           path: Command
       - uses: actions/checkout@v4
         with:
+          repository: ESPressio-Development-Platform/ESPressio-State
+          ref: primitives_redesign
+          path: State
+      - uses: actions/checkout@v4
+        with:
           repository: ESPressio-Development-Platform/ESPressio-Persistence
           ref: primitives_redesign
           path: Persistence
@@ -86,10 +91,9 @@ jobs:
       - name: Build Event direct-Radio A2 contract
         run: >-
           g++ -std=c++17 -Wall -Wextra -Werror -fno-rtti
-          -IRadioAdapters/src -IAdapters/src -IPrimitive/src -IRadio/src -IEvent/src
-          -ICommand/src -IPersistence/src -ISecurity/src
-          -ISystem/src -ITask/src -ITask/tests -IThreads/src -ITiming/src -ITiming/tests/stubs
-          -ISerializable/src -IUnits/src -IObservable/src
+          -IRadioAdapters/src -IAdapters/src -IPrimitive/src -IRadio/src -IEvent/src -ICommand/src -IState/src
+          -IPersistence/src -ISecurity/src -ISystem/src -ITask/src -ITask/tests -IThreads/src
+          -ITiming/src -ITiming/tests/stubs -ISerializable/src -IUnits/src -IObservable/src
           RadioAdapters/tests/event_radio_adapter_contract_test.cpp
           -o event_radio_adapter_contract_test -pthread
       - name: Run Event direct-Radio A2 contract
@@ -97,10 +101,9 @@ jobs:
       - name: Build Event destination-admission policy contract
         run: >-
           g++ -std=c++17 -Wall -Wextra -Werror -fno-rtti
-          -IRadioAdapters/src -IAdapters/src -IPrimitive/src -IRadio/src -IEvent/src
-          -ICommand/src -IPersistence/src -ISecurity/src
-          -ISystem/src -ITask/src -ITask/tests -IThreads/src -ITiming/src -ITiming/tests/stubs
-          -ISerializable/src -IUnits/src -IObservable/src
+          -IRadioAdapters/src -IAdapters/src -IPrimitive/src -IRadio/src -IEvent/src -ICommand/src -IState/src
+          -IPersistence/src -ISecurity/src -ISystem/src -ITask/src -ITask/tests -IThreads/src
+          -ITiming/src -ITiming/tests/stubs -ISerializable/src -IUnits/src -IObservable/src
           RadioAdapters/tests/event_radio_adapter_policy_test.cpp
           -o event_radio_adapter_policy_test -pthread
       - name: Run Event destination-admission policy contract
