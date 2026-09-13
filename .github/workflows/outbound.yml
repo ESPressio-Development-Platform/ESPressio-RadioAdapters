@@ -71,7 +71,8 @@ jobs:
       - name: Compile bounded direct Radio lower transport
         run: >-
           g++ -std=c++17 -Wall -Wextra -Werror -fno-rtti
-          -IRadioAdapters/src -IAdapters/src -IPrimitive/src -IRadio/src -IEvent/src -ISystem/src -ITask/src -IThreads/src -ITiming/src -ISerializable/src -IUnits/src -IObservable/src
+          -IRadioAdapters/src -IAdapters/src -IPrimitive/src -IRadio/src -IEvent/src -ISystem/src
+          -ITask/src -ITask/tests -IThreads/src -ITiming/src -ITiming/tests/stubs -ISerializable/src -IUnits/src -IObservable/src
           RadioAdapters/tests/radio_adapter_lower_transport_test.cpp
           -o radio_adapter_lower_transport_test
       - name: Run bounded direct Radio lower transport
