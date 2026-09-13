@@ -39,7 +39,7 @@ struct Provider final:Radio::IRadio {
     bool Start()override{return true;} void Stop()noexcept override{} bool IsStarted()const noexcept override{return true;}
     Radio::RadioCapabilities Capabilities()const noexcept override{return {Radio::RadioCapability::HardwareAddressing,32,1,128};}
     Radio::RadioAddress LocalAddress()const noexcept override{return Address;}
-    Radio::RadioContentionDomainId ContentionDomain()const noexcept override{return 7;}
+    Radio::RadioContentionDomainId ContentionDomain()const noexcept override{return {7};}
     Radio::RadioProviderResourceProfile ProviderResources()const noexcept override{return {1,1,1,0};}
     bool IsTransmitReady()const noexcept override{return true;}
     Radio::RadioTransmissionCost EstimateTransmissionCost(const Radio::RadioAddress&,std::size_t,const Radio::RadioServiceProfile&)const noexcept override{return {1,1,Radio::RadioCostEstimateQuality::ConservativeAirtime};}
@@ -80,6 +80,7 @@ int main(){
     controller.BindAdapterRuntime(adapter);
     assert(controller.IsValid());
 
+    const Radio::RadioContentionDomainId domain{7};
     const Adapters::AdapterRecordIdentity record{
         Adapters::AdapterDirection::Outbound,Adapters::CapacityDomainKind::ResponsivePrivate,2,11};
     const Adapters::AdapterRouteToken route{0x11223344ULL};
@@ -89,18 +90,18 @@ int main(){
 
     auto lease=controller.TransferIdLeaseTarget();
     assert(lease);
-    assert(!lease.IsReserved(lease.Context,7,17));
-    assert(lease.ReserveIssued(lease.Context,7,correlation,17));
-    assert(lease.IsReserved(lease.Context,7,17));
+    assert(!lease.IsReserved(lease.Context,domain,17));
+    assert(lease.ReserveIssued(lease.Context,domain,correlation,17));
+    assert(lease.IsReserved(lease.Context,domain,17));
 
-    controller.RadioLogicalTransferResolved({7,{17,Radio::RadioTransferTerminalStatus::Completed,
+    controller.RadioLogicalTransferResolved({domain,{17,Radio::RadioTransferTerminalStatus::Completed,
         Radio::RadioDirectLinkEvidence::CompletedWithoutPeerAcknowledgement()}});
     assert(wake.Count==0);
     assert(controller.ServiceOne()==Adapters::AdapterSubmissionDisposition::Rejected);
     assert(adapter.Count==0);
 
-    assert(!controller.HandleReceipt({0x9999ULL},7,17,Primitive::PrimitiveAdmissionDisposition::Accepted));
-    assert(controller.HandleReceipt(route,7,17,Primitive::PrimitiveAdmissionDisposition::Accepted));
+    assert(!controller.HandleReceipt({0x9999ULL},domain,17,Primitive::PrimitiveAdmissionDisposition::Accepted));
+    assert(controller.HandleReceipt(route,domain,17,Primitive::PrimitiveAdmissionDisposition::Accepted));
     assert(wake.Count==1);
     assert(adapter.Count==0);
     assert(controller.ServiceOne()==Adapters::AdapterSubmissionDisposition::Accepted);
@@ -111,13 +112,22 @@ int main(){
     assert(adapter.Completions[0].DestinationAdmission==Primitive::PrimitiveAdmissionDisposition::Accepted);
     assert(adapter.Completions[0].Disposition==Adapters::LowerTransportDisposition::Accepted);
     assert(controller.OutstandingAttempts()==0);
-    assert(!lease.IsReserved(lease.Context,7,17));
-    assert(!controller.HandleReceipt(route,7,17,Primitive::PrimitiveAdmissionDisposition::Accepted));
+    assert(!lease.IsReserved(lease.Context,domain,17));
+    assert(!controller.HandleReceipt(route,domain,17,Primitive::PrimitiveAdmissionDisposition::Accepted));
+
+    std::uint64_t cancelledCorrelation=0;
+    assert(controller.Reserve(record,route,cancelledCorrelation));
+    assert(lease.ReserveIssued(lease.Context,domain,cancelledCorrelation,19));
+    auto transportBinding=controller.TransportBinding();
+    assert(transportBinding);
+    transportBinding.CancelRecord(transportBinding.Owner,record);
+    assert(controller.OutstandingAttempts()==0);
+    assert(!lease.IsReserved(lease.Context,domain,19));
 
     std::uint64_t failedCorrelation=0;
     assert(controller.Reserve(record,route,failedCorrelation));
-    assert(lease.ReserveIssued(lease.Context,7,failedCorrelation,18));
-    controller.RadioLogicalTransferResolved({7,{18,Radio::RadioTransferTerminalStatus::TransmissionFailed,{}}});
+    assert(lease.ReserveIssued(lease.Context,domain,failedCorrelation,18));
+    controller.RadioLogicalTransferResolved({domain,{18,Radio::RadioTransferTerminalStatus::TransmissionFailed,{}}});
     assert(wake.Count==2);
     assert(controller.ServiceOne()==Adapters::AdapterSubmissionDisposition::Accepted);
     assert(adapter.Count==2);
