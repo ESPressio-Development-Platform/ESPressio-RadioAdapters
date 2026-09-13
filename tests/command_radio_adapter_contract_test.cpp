@@ -301,7 +301,8 @@ int main() {
     const auto submitted=C::CommandTypeRuntime<FireCommand>::Get().SubmitRemoteNoResponse<false>(remote.Device,73U);
     assert(static_cast<bool>(submitted));
     Eventually([&]{return radioRuntime.Calls.load(std::memory_order_acquire)>=1;});
-    assert(radioRuntime.Peer.ProviderSlot==7);
+    assert(radioRuntime.Peer.Slot==7);
+    assert(radioRuntime.Peer.Generation==7);
     assert(radioRuntime.Profile.Class==Radio::RadioServiceClass::BestEffort);
     assert(radioRuntime.Correlation==0);
 
