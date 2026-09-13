@@ -43,8 +43,8 @@ bool ResolvePolicy(void* owner,Primitive::PrimitiveFamilyId family,Primitive::Pr
     Radio::RadioServiceProfile& profile,Radio::RadioTransferTiming& timing) noexcept {
     auto& context=*static_cast<PolicyContext*>(owner);
     if(!context.Valid||family!=0x1234||protocol!=2||policy.MaximumAttempts==0) return false;
-    Radio::RadioServiceClass radioService{};
-    if(!RadioAdapters::TryToRadioServiceClass(service,radioService)) return false;
+    const auto radioService=RadioAdapters::ToRadioServiceClass(service);
+    if(!Radio::IsValidRadioServiceClass(radioService)) return false;
     profile.Class=radioService;
     profile.DeadlineTreatment=Radio::RadioDeadlineTreatment::ExpiryOnly;
     profile.RequiredDirectLinkEvidence=Radio::RadioDirectLinkEvidenceRequirement::TransmissionCompletion;
