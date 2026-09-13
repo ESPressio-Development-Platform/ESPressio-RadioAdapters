@@ -9,3 +9,4 @@
 #include "ESPressio_EventRadioAdapterBinding.hpp"
 #include "ESPressio_EventRadioAdapterOutboundTarget.hpp"
 #include "ESPressio_CommandRadioAdapterBinding.hpp"
+#include "ESPressio_StateRadioAdapterBinding.hpp"
