@@ -56,9 +56,11 @@ bool ValidatePolicy(void* owner) noexcept { return static_cast<PolicyContext*>(o
 struct M1Context {
     bool ReserveAllowed=true;
     std::uint64_t NextToken=0x12340001ULL;
+    std::uint64_t Generation=1;
     std::size_t ReserveCount=0;
     std::size_t CancelCount=0;
     std::size_t CancelRecordCount=0;
+    std::size_t QuiesceCount=0;
     Adapters::AdapterRecordIdentity LastRecord{};
     Adapters::AdapterRouteToken LastRoute{};
     std::uint64_t LastCancelled=0;
@@ -69,6 +71,8 @@ bool ReserveM1(void* owner,Adapters::AdapterRecordIdentity record,Adapters::Adap
 }
 void CancelM1(void* owner,std::uint64_t token) noexcept {auto& state=*static_cast<M1Context*>(owner);++state.CancelCount;state.LastCancelled=token;}
 void CancelRecordM1(void* owner,Adapters::AdapterRecordIdentity record) noexcept {auto& state=*static_cast<M1Context*>(owner);++state.CancelRecordCount;state.LastRecord=record;}
+void QuiesceM1(void* owner) noexcept {++static_cast<M1Context*>(owner)->QuiesceCount;}
+std::uint64_t M1Generation(void* owner) noexcept {return static_cast<M1Context*>(owner)->Generation;}
 
 } // namespace
 
@@ -76,11 +80,13 @@ int main(){
     FakeRadioRuntime radio;RouteContext routes;PolicyContext policies;M1Context m1;
     RadioAdapters::RadioAdapterRouteBinding routeBinding{&routes,&ResolveRoute,&ValidateRoute};
     RadioAdapters::RadioAdapterTransferPolicyBinding policyBinding{&policies,&ResolvePolicy,&ValidatePolicy};
-    RadioAdapters::RadioAdapterM1TransportBinding m1Binding{&m1,&ReserveM1,&CancelM1,&CancelRecordM1};
+    RadioAdapters::RadioAdapterM1TransportBinding m1Binding{
+        &m1,&ReserveM1,&CancelM1,&CancelRecordM1,&QuiesceM1,&M1Generation};
     RadioAdapters::RadioAdapterLowerTransport<FakeRadioRuntime,32> transport(radio,routeBinding,policyBinding,m1Binding);
     auto binding=transport.AdapterBinding();
     assert(binding&&binding.ProvidesDestinationPrimitiveAdmission&&!binding.ProvidesValidatedOriginalSource);
     assert(binding.Validate(binding.Owner));
+    assert(!transport.IsQuiesced()&&transport.LifecycleGeneration()==1);
 
     Primitive::PrimitivePolicyDescriptor policy{};policy.Category=1;policy.Evidence=0;policy.MaximumAttempts=1;
     std::array<std::uint8_t,3> familyBytes{{0xA1,0xB2,0xC3}};
@@ -125,6 +131,24 @@ int main(){
 
     routes.Valid=false;assert(!binding.Validate(binding.Owner));routes.Valid=true;policies.Valid=false;assert(!binding.Validate(binding.Owner));
     policies.Valid=true;radio.Running=false;assert(!binding.Validate(binding.Owner));radio.Running=true;
-    binding.Quiesce(binding.Owner);assert(!binding.Validate(binding.Owner));
+
+    binding.Quiesce(binding.Owner);
+    assert(!binding.Validate(binding.Owner));
+    assert(transport.IsQuiesced()&&transport.LifecycleGeneration()==1&&m1.QuiesceCount==1);
+    assert(binding.Submit(binding.Owner,record,0x1234,2,policy,Adapters::AdapterServiceClass::Responsive,
+        {familyBytes.data(),familyBytes.size()},route).Disposition==Adapters::LowerTransportDisposition::PermanentlyRejected);
+    binding.Quiesce(binding.Owner);
+    assert(m1.QuiesceCount==1);
+
+    FakeRadioRuntime replacement;
+    replacement.Next=Radio::RadioSchedulerStatus::Success;
+    assert(transport.Restart(replacement));
+    assert(!transport.IsQuiesced()&&transport.LifecycleGeneration()==2&&binding.Validate(binding.Owner));
+    const auto restarted=binding.Submit(binding.Owner,record,0x1234,2,policy,Adapters::AdapterServiceClass::Responsive,
+        {familyBytes.data(),familyBytes.size()},route);
+    assert(restarted.Disposition==Adapters::LowerTransportDisposition::Accepted);
+    assert(replacement.Size==7&&replacement.Correlation==0);
+    assert(!transport.Restart(replacement));
+
     return 0;
 }
