@@ -16,13 +16,15 @@ struct FakeRadioRuntime {
     Radio::RadioTransferTiming Timing{};
     std::array<std::uint8_t,32> Bytes{};
     std::size_t Size=0;
+    std::uint64_t Correlation=0;
     Radio::RadioSchedulerStatus Next=Radio::RadioSchedulerStatus::Success;
 
     bool IsRunning() const noexcept { return Running; }
     Radio::RadioTransferSubmissionResult SubmitPeer(
         Radio::RadioPeerHandle peer,const Radio::RadioServiceProfile& profile,
-        const Radio::RadioTransferTiming& timing,const std::uint8_t* bytes,std::size_t size) noexcept {
-        Peer=peer;Profile=profile;Timing=timing;Size=size;
+        const Radio::RadioTransferTiming& timing,const std::uint8_t* bytes,std::size_t size,
+        std::uint64_t correlation=0) noexcept {
+        Peer=peer;Profile=profile;Timing=timing;Size=size;Correlation=correlation;
         assert(size<=Bytes.size());
         for(std::size_t i=0;i<size;++i) Bytes[i]=bytes[i];
         return {Next,Next==Radio::RadioSchedulerStatus::Success?Radio::RadioTransferId{17}:Radio::RadioTransferId{0}};
@@ -77,6 +79,7 @@ int main(){
         {familyBytes.data(),familyBytes.size()},Adapters::AdapterRouteToken{0xAABBCCDDULL});
     assert(result.Disposition==Adapters::LowerTransportDisposition::Accepted);
     assert(!result.DeferredCompletion&&result.Generation==0);
+    assert(radio.Correlation==0);
     assert(radio.Peer==routes.Peer);
     assert(radio.Profile.Class==Radio::RadioServiceClass::Responsive);
     assert(radio.Profile.RequiredDirectLinkEvidence==Radio::RadioDirectLinkEvidenceRequirement::TransmissionCompletion);
