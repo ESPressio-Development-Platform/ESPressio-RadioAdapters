@@ -35,6 +35,21 @@ jobs:
           path: Event
       - uses: actions/checkout@v4
         with:
+          repository: ESPressio-Development-Platform/ESPressio-Command
+          ref: primitives_redesign
+          path: Command
+      - uses: actions/checkout@v4
+        with:
+          repository: ESPressio-Development-Platform/ESPressio-Persistence
+          ref: primitives_redesign
+          path: Persistence
+      - uses: actions/checkout@v4
+        with:
+          repository: ESPressio-Development-Platform/ESPressio-Security
+          ref: primitives_redesign
+          path: Security
+      - uses: actions/checkout@v4
+        with:
           repository: ESPressio-Development-Platform/ESPressio-System
           ref: primitives_redesign
           path: System
@@ -72,6 +87,7 @@ jobs:
         run: >-
           g++ -std=c++17 -Wall -Wextra -Werror -fno-rtti
           -IRadioAdapters/src -IAdapters/src -IPrimitive/src -IRadio/src -IEvent/src
+          -ICommand/src -IPersistence/src -ISecurity/src
           -ISystem/src -ITask/src -ITask/tests -IThreads/src -ITiming/src -ITiming/tests/stubs
           -ISerializable/src -IUnits/src -IObservable/src
           RadioAdapters/tests/event_radio_adapter_contract_test.cpp
@@ -82,6 +98,7 @@ jobs:
         run: >-
           g++ -std=c++17 -Wall -Wextra -Werror -fno-rtti
           -IRadioAdapters/src -IAdapters/src -IPrimitive/src -IRadio/src -IEvent/src
+          -ICommand/src -IPersistence/src -ISecurity/src
           -ISystem/src -ITask/src -ITask/tests -IThreads/src -ITiming/src -ITiming/tests/stubs
           -ISerializable/src -IUnits/src -IObservable/src
           RadioAdapters/tests/event_radio_adapter_policy_test.cpp
