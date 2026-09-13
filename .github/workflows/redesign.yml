@@ -1,0 +1,38 @@
+name: RadioAdapters redesign contracts
+
+on:
+  push:
+    branches:
+      - primitives_redesign
+  pull_request:
+
+jobs:
+  foundation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: RadioAdapters
+      - uses: actions/checkout@v4
+        with:
+          repository: ESPressio-Development-Platform/ESPressio-Adapters
+          ref: primitives_redesign
+          path: Adapters
+      - uses: actions/checkout@v4
+        with:
+          repository: ESPressio-Development-Platform/ESPressio-Primitive
+          ref: primitives_redesign
+          path: Primitive
+      - uses: actions/checkout@v4
+        with:
+          repository: ESPressio-Development-Platform/ESPressio-Radio
+          ref: primitives_redesign
+          path: Radio
+      - name: Compile exact prefix and service mapping vectors
+        run: >-
+          g++ -std=c++17 -Wall -Wextra -Werror -fno-rtti
+          -IRadioAdapters/src -IAdapters/src -IPrimitive/src -IRadio/src
+          RadioAdapters/tests/radio_adapter_foundation_test.cpp
+          -o radio_adapter_foundation_test
+      - name: Run exact prefix and service mapping vectors
+        run: ./radio_adapter_foundation_test
