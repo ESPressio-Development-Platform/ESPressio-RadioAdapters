@@ -117,6 +117,9 @@ Adapters::AdapterSubmissionDisposition AdmitCompletedRadioReassembly(
         {payload.Data,payload.Size},correlation,completionTarget);
 }
 
+/// <summary>
+/// Finite direct-Radio reassembly ingress bridge with generation-safe receipt completion across controlled restart.
+/// </summary>
 template<class TReassemblyTable,class TAdapterRuntime,std::size_t TMaximumBindings,
          std::size_t TMaximumPendingReceipts=TMaximumBindings>
 class RadioAdapterReassemblyIngress final : public Radio::IRadioReassemblyReadySink {
@@ -124,6 +127,7 @@ class RadioAdapterReassemblyIngress final : public Radio::IRadioReassemblyReadyS
     struct PendingReceipt final {
         bool Occupied{false};
         std::uint64_t Generation{0};
+        std::uint64_t LifecycleGeneration{0};
         Radio::IRadio* Provider=nullptr;
         Radio::RadioAddress Source{};
         Radio::RadioTransferId TransferId{0};
@@ -137,10 +141,14 @@ class RadioAdapterReassemblyIngress final : public Radio::IRadioReassemblyReadyS
     RadioAdapterM1ReceiptBinding _m1{};
     std::array<PendingReceipt,TMaximumPendingReceipts> _pendingReceipts{};
     System::Synchronization::Mutex _receiptMutex;
+    System::Synchronization::Mutex _lifecycleMutex;
+    std::atomic<bool> _quiesced{false};
+    std::atomic<std::uint64_t> _lifecycleGeneration{1};
     std::atomic<std::uint64_t> _accepted{0};
     std::atomic<std::uint64_t> _rejected{0};
     std::atomic<std::uint64_t> _receiptsConsumed{0};
     std::atomic<std::uint64_t> _receiptsSent{0};
+    std::atomic<std::uint64_t> _staleLifecycleCompletions{0};
 
     static constexpr std::uint64_t ReceiptSlotMask=0xffffULL;
     static constexpr std::uint64_t MaximumReceiptGeneration=(std::numeric_limits<std::uint64_t>::max()>>16u);
@@ -156,15 +164,23 @@ class RadioAdapterReassemblyIngress final : public Radio::IRadioReassemblyReadyS
         const auto generation=pending.Generation;pending={};pending.Generation=generation;
     }
 
+    void ClearAllPending() noexcept {
+        std::lock_guard<System::Synchronization::Mutex> lock(_receiptMutex);
+        for(auto& pending:_pendingReceipts) if(pending.Occupied) ClearPending(pending);
+    }
+
     bool ReservePending(const Radio::RadioReassemblyRecord& record,std::uint64_t& token) noexcept {
         token=0;
+        if(_quiesced.load(std::memory_order_acquire)) return false;
         std::unique_lock<System::Synchronization::Mutex> lock(_receiptMutex,std::try_to_lock);
-        if(!lock.owns_lock()) return false;
+        if(!lock.owns_lock()||_quiesced.load(std::memory_order_relaxed)) return false;
         for(std::size_t i=0;i<_pendingReceipts.size();++i){
             auto& pending=_pendingReceipts[i];if(pending.Occupied) continue;
             if(pending.Generation==MaximumReceiptGeneration) return false;
             ++pending.Generation;if(pending.Generation==0) return false;
-            pending.Occupied=true;pending.Provider=record.Provider;pending.Source=record.Source;
+            pending.Occupied=true;
+            pending.LifecycleGeneration=_lifecycleGeneration.load(std::memory_order_acquire);
+            pending.Provider=record.Provider;pending.Source=record.Source;
             pending.TransferId=record.TransferId;pending.Service=record.Service;
             token=ReceiptToken(i,pending.Generation);return true;
         }
@@ -187,12 +203,17 @@ class RadioAdapterReassemblyIngress final : public Radio::IRadioReassemblyReadyS
     void CompleteInbound(const Adapters::AdapterInboundCompletion& completion) noexcept {
         PendingReceipt pending{};
         if(!ReleasePending(completion.Correlation,pending)||!_m1||pending.Provider==nullptr) return;
+        if(_quiesced.load(std::memory_order_acquire)||
+           pending.LifecycleGeneration!=_lifecycleGeneration.load(std::memory_order_acquire)){
+            _staleLifecycleCompletions.fetch_add(1,std::memory_order_relaxed);
+            return;
+        }
         if(_m1.Send(_m1.Owner,*pending.Provider,pending.Source,pending.TransferId,pending.Service,completion.Admission))
             _receiptsSent.fetch_add(1,std::memory_order_relaxed);
     }
 
     bool ConsumeControlReceipt(const Radio::RadioReassemblyRecord& record,Adapters::AdapterByteView payload) noexcept {
-        if(!_m1) return false;
+        if(_quiesced.load(std::memory_order_acquire)||!_m1) return false;
         DirectRadioM1Receipt receipt{};
         if(!DecodeDirectRadioM1Receipt(payload,receipt)) return false;
         Adapters::AdapterSemanticProvenance provenance{};Adapters::AdapterRouteToken route{};
@@ -209,11 +230,45 @@ public:
         RadioAdapterProvenanceBinding provenance,RadioAdapterM1ReceiptBinding m1={}) noexcept
         :_reassembly(&reassembly),_runtime(&runtime),_bindings(&bindings),_provenance(provenance),_m1(m1) {}
 
+    /// <summary>
+    /// Stops new ingress, waits only for any currently executing bounded bridge quantum, and drops all volatile pending
+    /// receipt state. Family/A2 execution already admitted before this boundary is not force-killed.
+    /// </summary>
+    void Quiesce() noexcept {
+        if(_quiesced.exchange(true,std::memory_order_acq_rel)) return;
+        std::lock_guard<System::Synchronization::Mutex> lifecycleLock(_lifecycleMutex);
+        ClearAllPending();
+    }
+
+    /// <summary>Rebinds a replacement A2 runtime and advances the non-wrapping ingress lifecycle generation.</summary>
+    bool Restart(TAdapterRuntime& runtime) noexcept {
+        if(!_quiesced.load(std::memory_order_acquire)) return false;
+        std::lock_guard<System::Synchronization::Mutex> lifecycleLock(_lifecycleMutex);
+        if(!_quiesced.load(std::memory_order_relaxed)) return false;
+        const auto current=_lifecycleGeneration.load(std::memory_order_relaxed);
+        if(current==std::numeric_limits<std::uint64_t>::max()) return false;
+        ClearAllPending();
+        _runtime=&runtime;
+        _lifecycleGeneration.store(current+1u,std::memory_order_release);
+        _quiesced.store(false,std::memory_order_release);
+        return true;
+    }
+
+    bool IsQuiesced() const noexcept { return _quiesced.load(std::memory_order_acquire); }
+    std::uint64_t LifecycleGeneration() const noexcept { return _lifecycleGeneration.load(std::memory_order_acquire); }
+    std::uint64_t StaleLifecycleCompletions() const noexcept {
+        return _staleLifecycleCompletions.load(std::memory_order_acquire);
+    }
+
     void RadioReassemblyReady(Radio::IRadio& provider,const Radio::RadioAddress& source,
         Radio::RadioTransferId transferId,Radio::RadioServiceClass service) noexcept override {
+        std::lock_guard<System::Synchronization::Mutex> lifecycleLock(_lifecycleMutex);
         Radio::RadioCompletedReassembly completed{};
         const auto taken=_reassembly->TakeCompleteTrusted(provider,source,transferId,completed);
         if(taken!=Radio::RadioReassemblyStatus::Complete||!completed){_rejected.fetch_add(1,std::memory_order_relaxed);return;}
+        if(_quiesced.load(std::memory_order_acquire)){
+            completed.Reset();_rejected.fetch_add(1,std::memory_order_relaxed);return;
+        }
         if(completed.Record().Service!=service){completed.Reset();_rejected.fetch_add(1,std::memory_order_relaxed);return;}
 
         const auto payload=completed.Payload();
@@ -231,7 +286,8 @@ public:
         std::uint64_t receiptToken=0;
         if(_m1&&!ReservePending(completed.Record(),receiptToken)){
             const auto& record=completed.Record();
-            if(_m1.Send(_m1.Owner,*record.Provider,record.Source,record.TransferId,record.Service,
+            if(!_quiesced.load(std::memory_order_acquire)&&
+               _m1.Send(_m1.Owner,*record.Provider,record.Source,record.TransferId,record.Service,
                 Primitive::PrimitiveAdmissionDisposition::ResourceUnavailable))
                 _receiptsSent.fetch_add(1,std::memory_order_relaxed);
             completed.Reset();_rejected.fetch_add(1,std::memory_order_relaxed);return;
@@ -244,7 +300,9 @@ public:
 
         if(disposition!=Adapters::AdapterSubmissionDisposition::Accepted&&receiptToken){
             PendingReceipt pending{};
-            if(ReleasePending(receiptToken,pending)&&pending.Provider&&_m1.Send(
+            if(ReleasePending(receiptToken,pending)&&pending.Provider&&
+               pending.LifecycleGeneration==_lifecycleGeneration.load(std::memory_order_acquire)&&
+               !_quiesced.load(std::memory_order_acquire)&&_m1.Send(
                 _m1.Owner,*pending.Provider,pending.Source,pending.TransferId,pending.Service,
                 ToPrimitiveAdmissionDisposition(disposition)))
                 _receiptsSent.fetch_add(1,std::memory_order_relaxed);
