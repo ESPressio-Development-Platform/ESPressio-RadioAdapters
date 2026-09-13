@@ -77,8 +77,8 @@ int main(){
     FakeRadioRuntime radio;FakeAdapterRuntime adapter;ReceiptPolicy receiptPolicy;WakeState wake;
     RadioAdapters::RadioAdapterM1Controller<FakeRadioRuntime,4> controller(
         radio,{&receiptPolicy,&ResolveReceipt,&ValidateReceipt},{&wake,&Wake});
-    controller.BindAdapterRuntime(adapter);
-    assert(controller.IsValid());
+    assert(controller.BindAdapterRuntime(adapter));
+    assert(controller.IsValid()&&controller.IsActive()&&controller.LifecycleGeneration()==1);
 
     const Radio::RadioContentionDomainId domain{7};
     const Adapters::AdapterRecordIdentity record{
@@ -112,7 +112,8 @@ int main(){
     assert(adapter.Completions[0].DestinationAdmission==Primitive::PrimitiveAdmissionDisposition::Accepted);
     assert(adapter.Completions[0].Disposition==Adapters::LowerTransportDisposition::Accepted);
     assert(controller.OutstandingAttempts()==0);
-    assert(!lease.IsReserved(lease.Context,domain,17));
+    // A completed M1 id remains in the bounded restart exclusion window rather than becoming immediately reusable.
+    assert(lease.IsReserved(lease.Context,domain,17));
     assert(!controller.HandleReceipt(route,domain,17,Primitive::PrimitiveAdmissionDisposition::Accepted));
 
     std::uint64_t cancelledCorrelation=0;
@@ -122,7 +123,7 @@ int main(){
     assert(transportBinding);
     transportBinding.CancelRecord(transportBinding.Owner,record);
     assert(controller.OutstandingAttempts()==0);
-    assert(!lease.IsReserved(lease.Context,domain,19));
+    assert(lease.IsReserved(lease.Context,domain,19));
 
     std::uint64_t failedCorrelation=0;
     assert(controller.Reserve(record,route,failedCorrelation));
@@ -135,6 +136,7 @@ int main(){
     assert(!adapter.Completions[1].HasDestinationAdmission);
     assert(adapter.Completions[1].Disposition==Adapters::LowerTransportDisposition::ResourceUnavailable);
     assert(controller.OutstandingAttempts()==0);
+    assert(lease.IsReserved(lease.Context,domain,18));
 
     std::array<std::uint8_t,RadioAdapters::DirectRadioM1ReceiptBytes> encoded{};
     assert(RadioAdapters::EncodeDirectRadioM1Receipt(0x1234,Primitive::PrimitiveAdmissionDisposition::AlreadyAccepted,
@@ -157,6 +159,44 @@ int main(){
     assert(decoded.OriginalTransferId==0x3344);
     assert(decoded.Admission==Primitive::PrimitiveAdmissionDisposition::ResourceUnavailable);
     assert(radio.LastProfile.Class==Radio::RadioServiceClass::Infrastructure);
+
+    // Hold one live attempt across controlled shutdown. Quiesce must release the volatile attempt while remembering
+    // its transfer id so a fresh Radio scheduler cannot immediately reuse it for a different semantic occurrence.
+    std::uint64_t oldLifecycleCorrelation=0;
+    assert(controller.Reserve(record,route,oldLifecycleCorrelation));
+    assert(lease.ReserveIssued(lease.Context,domain,oldLifecycleCorrelation,21));
+    assert(controller.OutstandingAttempts()==1);
+    assert(transportBinding.Quiesce&&transportBinding.LifecycleGeneration);
+    transportBinding.Quiesce(transportBinding.Owner);
+    assert(!controller.IsActive()&&!controller.IsValid());
+    assert(controller.OutstandingAttempts()==0);
+    assert(controller.LifecycleGeneration()==1);
+    assert(lease.IsReserved(lease.Context,domain,21));
+    const auto staleBefore=controller.StaleLifecycleSignals();
+    controller.RadioLogicalTransferResolved({domain,{21,Radio::RadioTransferTerminalStatus::TransmissionFailed,{}}});
+    assert(!controller.HandleReceipt(route,domain,21,Primitive::PrimitiveAdmissionDisposition::Accepted));
+    assert(controller.StaleLifecycleSignals()>=staleBefore+2);
+    assert(adapter.Count==2);
+    assert(!controller.SendReceipt(provider,source,21,Radio::RadioServiceClass::Responsive,
+        Primitive::PrimitiveAdmissionDisposition::Accepted));
+
+    FakeRadioRuntime replacementRadio;FakeAdapterRuntime replacementAdapter;
+    assert(controller.RebindRadioRuntime(replacementRadio));
+    assert(controller.BindAdapterRuntime(replacementAdapter));
+    assert(controller.IsActive()&&controller.IsValid()&&controller.LifecycleGeneration()==2);
+
+    std::uint64_t replacementCorrelation=0;
+    assert(controller.Reserve(record,route,replacementCorrelation));
+    // The old lifecycle id is still excluded even though the replacement scheduler could have restarted at 1.
+    assert(!lease.ReserveIssued(lease.Context,domain,replacementCorrelation,21));
+    assert(lease.ReserveIssued(lease.Context,domain,replacementCorrelation,22));
+    assert(!controller.HandleReceipt(route,domain,21,Primitive::PrimitiveAdmissionDisposition::Accepted));
+    assert(controller.HandleReceipt(route,domain,22,Primitive::PrimitiveAdmissionDisposition::AlreadyAccepted));
+    assert(controller.ServiceOne()==Adapters::AdapterSubmissionDisposition::Accepted);
+    assert(replacementAdapter.Count==1);
+    assert(replacementAdapter.Completions[0].TransportGeneration==replacementCorrelation);
+    assert(replacementAdapter.Completions[0].DestinationAdmission==Primitive::PrimitiveAdmissionDisposition::AlreadyAccepted);
+    assert(controller.OutstandingAttempts()==0);
 
     return 0;
 }
