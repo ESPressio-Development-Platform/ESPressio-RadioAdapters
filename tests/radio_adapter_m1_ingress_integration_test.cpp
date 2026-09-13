@@ -43,8 +43,8 @@ public:
 
 struct PolicyContext final {};
 RadioAdapters::RadioAdapterBindingResolutionStatus ResolvePolicy(
-    void*,Primitive::PrimitiveProtocolVersion protocol,Adapters::AdapterByteView bytes,
-    Primitive::PrimitivePolicyDescriptor& policy) noexcept {
+    void*,Primitive::PrimitiveProtocolVersion protocol,Adapters::AdapterServiceClass,
+    Adapters::AdapterByteView bytes,Primitive::PrimitivePolicyDescriptor& policy) noexcept {
     if(protocol!=1) return RadioAdapters::RadioAdapterBindingResolutionStatus::Unsupported;
     if(bytes.Data==nullptr||bytes.Size==0) return RadioAdapters::RadioAdapterBindingResolutionStatus::Malformed;
     policy={};policy.Category=1;policy.Evidence=1;policy.MaximumAttempts=1;
@@ -152,14 +152,11 @@ int main(){
     assert(RadioAdapters::EncodeDirectRadioPrimitivePrefix(0x1234,1,data.data(),data.size()));
     data[4]=0xAA;data[5]=0xBB;
 
-    // Accepted Radio data is handed to A2 first; exact M1 is emitted only when A2 publishes semantic completion.
     PutComplete(table,provider,source,destination,41,Radio::RadioServiceClass::Responsive,data.data(),data.size());
     ingress.RadioReassemblyReady(provider,source,41,Radio::RadioServiceClass::Responsive);
     assert(runtime.Calls==1&&runtime.Family==0x1234&&runtime.Correlation!=0&&runtime.Completion);
     assert(m1State.Sends==0);
 
-    // The one-slot receipt context is intentionally held. A second completed message receives ResourceUnavailable
-    // without another A2 admission, proving bounded nonblocking saturation.
     PutComplete(table,provider,source,destination,42,Radio::RadioServiceClass::Responsive,data.data(),data.size());
     ingress.RadioReassemblyReady(provider,source,42,Radio::RadioServiceClass::Responsive);
     assert(runtime.Calls==1);
@@ -172,7 +169,6 @@ int main(){
     assert(m1State.LastAdmission==Primitive::PrimitiveAdmissionDisposition::Accepted);
     assert(ingress.ReceiptsSentCount()==2);
 
-    // Immediate family-resolution failure maps directly to exact M1 and never enters A2.
     std::array<std::uint8_t,5> unsupported{};
     assert(RadioAdapters::EncodeDirectRadioPrimitivePrefix(0x9999,1,unsupported.data(),unsupported.size()));
     unsupported[4]=0x01;
@@ -182,7 +178,6 @@ int main(){
     assert(m1State.Sends==3&&m1State.LastTransfer==43);
     assert(m1State.LastAdmission==Primitive::PrimitiveAdmissionDisposition::Unsupported);
 
-    // M1 control receipts are intercepted before family demux and cannot recursively generate a receipt.
     std::array<std::uint8_t,RadioAdapters::DirectRadioM1ReceiptBytes> receipt{};
     assert(RadioAdapters::EncodeDirectRadioM1Receipt(77,Primitive::PrimitiveAdmissionDisposition::AlreadyAccepted,
         receipt.data(),receipt.size()));
@@ -193,7 +188,6 @@ int main(){
     assert(m1State.LastTransfer==77&&m1State.LastAdmission==Primitive::PrimitiveAdmissionDisposition::AlreadyAccepted);
     assert(ingress.ReceiptsConsumedCount()==1);
 
-    // A receipt that fails route/correlation validation is rejected locally and still does not recurse.
     m1State.AcceptHandle=false;
     assert(RadioAdapters::EncodeDirectRadioM1Receipt(78,Primitive::PrimitiveAdmissionDisposition::Accepted,
         receipt.data(),receipt.size()));
@@ -202,7 +196,7 @@ int main(){
     assert(runtime.Calls==1&&m1State.Handles==2&&m1State.Sends==3);
     assert(ingress.ReceiptsConsumedCount()==1);
 
-    assert(ingress.AcceptedCount()==2); // transfer 41 plus consumed control receipt 44
-    assert(ingress.RejectedCount()==3); // saturation 42, unsupported 43, rejected control receipt 45
+    assert(ingress.AcceptedCount()==2);
+    assert(ingress.RejectedCount()==3);
     return 0;
 }
