@@ -78,3 +78,13 @@ jobs:
           -o event_radio_adapter_contract_test -pthread
       - name: Run Event direct-Radio A2 contract
         run: ./event_radio_adapter_contract_test
+      - name: Build Event destination-admission policy contract
+        run: >-
+          g++ -std=c++17 -Wall -Wextra -Werror -fno-rtti
+          -IRadioAdapters/src -IAdapters/src -IPrimitive/src -IRadio/src -IEvent/src
+          -ISystem/src -ITask/src -ITask/tests -IThreads/src -ITiming/src -ITiming/tests/stubs
+          -ISerializable/src -IUnits/src -IObservable/src
+          RadioAdapters/tests/event_radio_adapter_policy_test.cpp
+          -o event_radio_adapter_policy_test -pthread
+      - name: Run Event destination-admission policy contract
+        run: ./event_radio_adapter_policy_test
