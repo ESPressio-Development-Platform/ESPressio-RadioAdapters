@@ -45,3 +45,13 @@ jobs:
           -o state_radio_adapter_outbound_test -pthread
       - name: Run State outbound direct-Radio contract
         run: ./state_radio_adapter_outbound_test
+      - name: Compile State inbound direct-Radio contract
+        run: >-
+          g++ -std=c++17 -Wall -Wextra -Werror -fno-rtti
+          -IRadioAdapters/src -IAdapters/src -IPrimitive/src -IRadio/src -ISystem/src -IState/src
+          -IPersistence/src -ITask/src -ITask/tests -IThreads/src -ITiming/src -ITiming/tests/stubs
+          -ISerializable/src -IUnits/src -IObservable/src
+          RadioAdapters/tests/state_radio_adapter_inbound_test.cpp
+          -o state_radio_adapter_inbound_test -pthread
+      - name: Run State inbound direct-Radio contract
+        run: ./state_radio_adapter_inbound_test
