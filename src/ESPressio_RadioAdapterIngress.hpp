@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -148,10 +149,10 @@ class RadioAdapterReassemblyIngress final : public Radio::IRadioReassemblyReadyS
     RadioAdapterM1ReceiptBinding _m1{};
     std::array<PendingReceipt,TMaximumPendingReceipts> _pendingReceipts{};
     System::Synchronization::Mutex _receiptMutex;
-    std::uint64_t _accepted=0;
-    std::uint64_t _rejected=0;
-    std::uint64_t _receiptsConsumed=0;
-    std::uint64_t _receiptsSent=0;
+    std::atomic<std::uint64_t> _accepted{0};
+    std::atomic<std::uint64_t> _rejected{0};
+    std::atomic<std::uint64_t> _receiptsConsumed{0};
+    std::atomic<std::uint64_t> _receiptsSent{0};
 
     static constexpr std::uint64_t ReceiptSlotMask=0xffffULL;
     static constexpr std::uint64_t MaximumReceiptGeneration=(std::numeric_limits<std::uint64_t>::max()>>16u);
@@ -199,7 +200,7 @@ class RadioAdapterReassemblyIngress final : public Radio::IRadioReassemblyReadyS
         PendingReceipt pending{};
         if(!ReleasePending(completion.Correlation,pending)||!_m1||pending.Provider==nullptr) return;
         if(_m1.Send(_m1.Owner,*pending.Provider,pending.Source,pending.TransferId,pending.Service,completion.Admission))
-            ++_receiptsSent;
+            _receiptsSent.fetch_add(1,std::memory_order_relaxed);
     }
 
     bool ConsumeControlReceipt(const Radio::RadioReassemblyRecord& record,Adapters::AdapterByteView payload) noexcept {
@@ -211,7 +212,7 @@ class RadioAdapterReassemblyIngress final : public Radio::IRadioReassemblyReadyS
         if(status!=RadioAdapterBindingResolutionStatus::Success||!route) return false;
         if(!_m1.Handle(_m1.Owner,route,record.Provider->ContentionDomain(),receipt.OriginalTransferId,receipt.Admission))
             return false;
-        ++_receiptsConsumed;return true;
+        _receiptsConsumed.fetch_add(1,std::memory_order_relaxed);return true;
     }
 
 public:
@@ -224,8 +225,8 @@ public:
         Radio::RadioTransferId transferId,Radio::RadioServiceClass service) noexcept override {
         Radio::RadioCompletedReassembly completed{};
         const auto taken=_reassembly->TakeCompleteTrusted(provider,source,transferId,completed);
-        if(taken!=Radio::RadioReassemblyStatus::Complete||!completed){++_rejected;return;}
-        if(completed.Record().Service!=service){completed.Reset();++_rejected;return;}
+        if(taken!=Radio::RadioReassemblyStatus::Complete||!completed){_rejected.fetch_add(1,std::memory_order_relaxed);return;}
+        if(completed.Record().Service!=service){completed.Reset();_rejected.fetch_add(1,std::memory_order_relaxed);return;}
 
         const auto payload=completed.Payload();
         DirectRadioPrimitivePrefix prefix{};
@@ -234,7 +235,8 @@ public:
            prefix.Family==DirectRadioM1ControlFamily&&prefix.Protocol==DirectRadioM1ControlProtocol){
             const bool consumed=ConsumeControlReceipt(completed.Record(),{payload.Data,payload.Size});
             completed.Reset();
-            if(consumed)++_accepted;else ++_rejected;
+            if(consumed)_accepted.fetch_add(1,std::memory_order_relaxed);
+            else _rejected.fetch_add(1,std::memory_order_relaxed);
             return;
         }
 
@@ -243,7 +245,7 @@ public:
             const auto& record=completed.Record();
             (void)_m1.Send(_m1.Owner,*record.Provider,record.Source,record.TransferId,record.Service,
                 Primitive::PrimitiveAdmissionDisposition::ResourceUnavailable);
-            completed.Reset();++_rejected;return;
+            completed.Reset();_rejected.fetch_add(1,std::memory_order_relaxed);return;
         }
 
         const auto disposition=AdmitCompletedRadioReassembly(
@@ -255,17 +257,18 @@ public:
             PendingReceipt pending{};
             if(ReleasePending(receiptToken,pending)&&pending.Provider&&_m1.Send(
                 _m1.Owner,*pending.Provider,pending.Source,pending.TransferId,pending.Service,
-                ToPrimitiveAdmissionDisposition(disposition))) ++_receiptsSent;
+                ToPrimitiveAdmissionDisposition(disposition)))
+                _receiptsSent.fetch_add(1,std::memory_order_relaxed);
         }
         completed.Reset();
-        if(disposition==Adapters::AdapterSubmissionDisposition::Accepted)++_accepted;
-        else ++_rejected;
+        if(disposition==Adapters::AdapterSubmissionDisposition::Accepted)_accepted.fetch_add(1,std::memory_order_relaxed);
+        else _rejected.fetch_add(1,std::memory_order_relaxed);
     }
 
-    std::uint64_t AcceptedCount()const noexcept{return _accepted;}
-    std::uint64_t RejectedCount()const noexcept{return _rejected;}
-    std::uint64_t ReceiptsConsumedCount()const noexcept{return _receiptsConsumed;}
-    std::uint64_t ReceiptsSentCount()const noexcept{return _receiptsSent;}
+    std::uint64_t AcceptedCount()const noexcept{return _accepted.load(std::memory_order_relaxed);}
+    std::uint64_t RejectedCount()const noexcept{return _rejected.load(std::memory_order_relaxed);}
+    std::uint64_t ReceiptsConsumedCount()const noexcept{return _receiptsConsumed.load(std::memory_order_relaxed);}
+    std::uint64_t ReceiptsSentCount()const noexcept{return _receiptsSent.load(std::memory_order_relaxed);}
 };
 
 } // namespace ESPressio::RadioAdapters
