@@ -53,7 +53,9 @@ template<class Predicate> void Eventually(Predicate&& predicate) {
 struct RouteResolver final {
     static bool Validate(void*) noexcept { return true; }
     static bool Resolve(void*,System::DeviceIdentifier device,Adapters::AdapterRouteToken& route) noexcept {
-        if(!device) return false;route.Value=0xE000U+device.Bytes().back();return true;
+        if(!device) return false;
+        route.Value=0xE000U+device.Bytes().back();
+        return true;
     }
 };
 struct Signal final { std::atomic<unsigned> Wakes{0};static void Wake(void* owner) noexcept { ++static_cast<Signal*>(owner)->Wakes; } };
