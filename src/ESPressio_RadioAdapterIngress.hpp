@@ -52,8 +52,6 @@ constexpr Primitive::PrimitiveAdmissionDisposition ToPrimitiveAdmissionDispositi
     return Primitive::PrimitiveAdmissionDisposition::Rejected;
 }
 
-/// <summary>Validates/demultiplexes one trusted direct-Radio logical message and transfers only family bytes into A2.</summary>
-/// <remarks>The borrowed Radio bytes are valid only for this call. A2 copies accepted bytes before returning.</remarks>
 template<class TAdapterRuntime,std::size_t TMaximumBindings>
 Adapters::AdapterSubmissionDisposition AdmitDirectRadioLogicalMessage(
     TAdapterRuntime& runtime,
@@ -85,7 +83,8 @@ Adapters::AdapterSubmissionDisposition AdmitDirectRadioLogicalMessage(
         logicalMessage.Size-DirectRadioPrimitivePrefixBytes};
 
     Primitive::PrimitivePolicyDescriptor policy{};
-    const auto policyStatus=binding->ResolvePolicy(binding->Owner,prefix.Protocol,familyBytes,policy);
+    const auto policyStatus=binding->ResolvePolicy(
+        binding->Owner,prefix.Protocol,adapterService,familyBytes,policy);
     if(policyStatus!=RadioAdapterBindingResolutionStatus::Success)
         return ToAdapterSubmissionDisposition(policyStatus);
 
@@ -100,7 +99,6 @@ Adapters::AdapterSubmissionDisposition AdmitDirectRadioLogicalMessage(
         prefix.Family,adapterService,prefix.Protocol,familyBytes,provenance,route,policy,correlation,completion);
 }
 
-/// <summary>Offers one Radio-owned completed trusted reassembly to A2 without retaining its lease or byte pointer.</summary>
 template<class TAdapterRuntime,std::size_t TMaximumBindings>
 Adapters::AdapterSubmissionDisposition AdmitCompletedRadioReassembly(
     TAdapterRuntime& runtime,
@@ -119,16 +117,6 @@ Adapters::AdapterSubmissionDisposition AdmitCompletedRadioReassembly(
         {payload.Data,payload.Size},correlation,completionTarget);
 }
 
-/// <summary>
-/// Fixed Radio reassembly-ready sink; one bounded take+handoff quantum, exact-M1 receipt lifecycle and no local retry loop.
-/// </summary>
-/// <remarks>
-/// Ordinary Primitive messages reserve at most one fixed receipt context until A2 publishes exact family admission. The
-/// context owns only link metadata required to emit the separate control receipt; A2 owns all family bytes after accepted
-/// handoff. `{Family=0,Protocol=1}` control receipts are consumed before family demux and never generate another receipt.
-/// Receipt transmission itself is one bounded Radio submission; if it cannot be admitted, sender-side P2 retry of the
-/// original Primitive occurrence provides the next opportunity for an idempotent `AlreadyAccepted` receipt.
-/// </remarks>
 template<class TReassemblyTable,class TAdapterRuntime,std::size_t TMaximumBindings,
          std::size_t TMaximumPendingReceipts=TMaximumBindings>
 class RadioAdapterReassemblyIngress final : public Radio::IRadioReassemblyReadySink {
