@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <mutex>
 
 #include <ESPressio_AdapterTransport.hpp>
@@ -66,6 +67,11 @@ constexpr bool RadioPolicyNeedsDestinationAdmission(
 /// fragment, or family object. When the optional M1 binding is present, only P2 occurrences explicitly requiring
 /// destination Primitive admission reserve a generation-safe deferred attempt. Link completion/peer acknowledgement never
 /// establishes M1. NoRemoteEvidence keeps the original immediate lower-transport-acceptance path.
+///
+/// R9-11 adds an explicit non-zero lifecycle generation. Quiesce publishes rejection before waiting for any synchronous
+/// workspace user to leave, then quiesces M1 correlation and never starts new transport work. Restart is owner-driven,
+/// bounded and legal only from Quiesced; it installs the replacement already-running Radio runtime, advances generation
+/// without wrap and re-enables the immutable route/policy composition. The lifecycle adds no wire bytes and owns no retry.
 /// </remarks>
 template<class TRadioRuntime,std::size_t TMaximumLogicalMessageBytes>
 class RadioAdapterLowerTransport final {
@@ -78,6 +84,7 @@ class RadioAdapterLowerTransport final {
     std::array<std::uint8_t,TMaximumLogicalMessageBytes> _workspace{};
     System::Synchronization::Mutex _workspaceMutex;
     std::atomic<bool> _quiesced{false};
+    std::atomic<std::uint64_t> _lifecycleGeneration{1};
 
     static Adapters::LowerTransportSubmitResult SubmitThunk(
         void* owner,Adapters::AdapterRecordIdentity record,
@@ -119,6 +126,12 @@ class RadioAdapterLowerTransport final {
             if(transportGeneration) self._m1.Cancel(self._m1.Owner,transportGeneration);
             return {Adapters::LowerTransportDisposition::TemporarilyUnavailable,0,false};
         }
+        // Quiesce publishes before acquiring this same mutex. Re-check after acquisition so an in-flight caller that
+        // lost the race cannot enter the replacement lifecycle after the owner has begun shutdown.
+        if(self._quiesced.load(std::memory_order_acquire)){
+            if(transportGeneration) self._m1.Cancel(self._m1.Owner,transportGeneration);
+            return {Adapters::LowerTransportDisposition::PermanentlyRejected,0,false};
+        }
         if(!EncodeDirectRadioPrimitivePrefix(family,protocol,self._workspace.data(),self._workspace.size())){
             if(transportGeneration) self._m1.Cancel(self._m1.Owner,transportGeneration);
             return {Adapters::LowerTransportDisposition::PermanentlyRejected,0,false};
@@ -138,7 +151,8 @@ class RadioAdapterLowerTransport final {
 
     static bool ValidateThunk(void* owner) noexcept {
         auto& self=*static_cast<RadioAdapterLowerTransport*>(owner);
-        return !self._quiesced.load(std::memory_order_acquire)&&self._radio!=nullptr&&self._radio->IsRunning()&&self._routes&&self._policy&&
+        return !self._quiesced.load(std::memory_order_acquire)&&self._lifecycleGeneration.load(std::memory_order_acquire)!=0&&
+               self._radio!=nullptr&&self._radio->IsRunning()&&self._routes&&self._policy&&
                self._routes.Validate(self._routes.Owner)&&self._policy.Validate(self._policy.Owner);
     }
 
@@ -148,7 +162,10 @@ class RadioAdapterLowerTransport final {
     }
 
     static void QuiesceThunk(void* owner) noexcept {
-        static_cast<RadioAdapterLowerTransport*>(owner)->_quiesced.store(true,std::memory_order_release);
+        auto& self=*static_cast<RadioAdapterLowerTransport*>(owner);
+        if(self._quiesced.exchange(true,std::memory_order_acq_rel)) return;
+        std::lock_guard<System::Synchronization::Mutex> lock(self._workspaceMutex);
+        if(self._m1&&self._m1.Quiesce) self._m1.Quiesce(self._m1.Owner);
     }
 
 public:
@@ -159,6 +176,25 @@ public:
     RadioAdapterLowerTransport& operator=(const RadioAdapterLowerTransport&)=delete;
 
     bool IsValid() const noexcept { return _radio!=nullptr&&_routes&&_policy; }
+    bool IsQuiesced() const noexcept { return _quiesced.load(std::memory_order_acquire); }
+    std::uint64_t LifecycleGeneration() const noexcept { return _lifecycleGeneration.load(std::memory_order_acquire); }
+
+    /// <summary>
+    /// Re-arms this finite binding for a replacement already-running Radio runtime after controlled shutdown.
+    /// M1 ownership must have been rebound to the replacement A2 runtime before evidence-requiring submissions resume.
+    /// </summary>
+    bool Restart(TRadioRuntime& radio) noexcept {
+        if(!_quiesced.load(std::memory_order_acquire)||!radio.IsRunning()||!_routes||!_policy||
+           !_routes.Validate(_routes.Owner)||!_policy.Validate(_policy.Owner)) return false;
+        std::lock_guard<System::Synchronization::Mutex> lock(_workspaceMutex);
+        if(!_quiesced.load(std::memory_order_relaxed)) return false;
+        const auto current=_lifecycleGeneration.load(std::memory_order_relaxed);
+        if(current==std::numeric_limits<std::uint64_t>::max()) return false;
+        _radio=&radio;
+        _lifecycleGeneration.store(current+1u,std::memory_order_release);
+        _quiesced.store(false,std::memory_order_release);
+        return true;
+    }
 
     Adapters::LowerTransportBinding AdapterBinding() noexcept {
         if(!IsValid()) return {};
