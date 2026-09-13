@@ -8,3 +8,4 @@
 #include "ESPressio_RadioAdapterServiceMapping.hpp"
 #include "ESPressio_EventRadioAdapterBinding.hpp"
 #include "ESPressio_EventRadioAdapterOutboundTarget.hpp"
+#include "ESPressio_CommandRadioAdapterBinding.hpp"
