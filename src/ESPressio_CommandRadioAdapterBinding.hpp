@@ -130,6 +130,8 @@ constexpr std::uint8_t ServiceBit(Adapters::AdapterServiceClass service) noexcep
 /// retain only the trivially-copyable CommandRequestDeliveryToken in a finite campaign slot until A2 terminal feedback.
 /// Response destinations retain only a generation, Type slot and opaque route token. No request/response payload, retry
 /// schedule, execution state, durable ledger, fragmentation state or Radio transfer state is duplicated here.
+/// Direct-Radio ingress obtains semantic provenance from the RadioAdapter provenance resolver before A2 ownership handoff;
+/// AdmitInbound then requires and exactly cross-checks that validated identity against the Command wire origin/executor.
 /// </remarks>
 template<class TAdapterRuntime,std::size_t TMaximumTypes,std::size_t TMaximumResponseDestinations,
          std::size_t TMaximumRequestCampaigns=TMaximumResponseDestinations>
@@ -612,7 +614,11 @@ public:
         binding.MaximumOutboundBytes=_maximumOutboundBytes;
         binding.ServiceClassMask=_serviceMask;
         binding.RequiresDestinationAdmissionEvidence=_requiresDestinationEvidence;
-        binding.RequiresValidatedOriginalSource=true;
+        // Direct-Radio ingress provenance is established by the RadioAdapter provenance resolver before A2 handoff,
+        // then AdmitInbound above requires and exactly cross-checks it against the Command wire identity. The generic
+        // A2 flag is intentionally not asserted here because that flag describes provenance supplied by the bound
+        // lower-transport seam, and Radio's outbound lower transport does not authenticate ingress.
+        binding.RequiresValidatedOriginalSource=false;
         binding.Owner=this;
         binding.AdmitInbound=&CommandRadioAdapterFamilyBinding::AdmitInbound;
         binding.EncodeOutbound=&CommandRadioAdapterFamilyBinding::EncodeOutbound;
