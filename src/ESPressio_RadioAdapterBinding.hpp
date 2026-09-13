@@ -99,4 +99,27 @@ struct RadioAdapterProvenanceBinding final {
     constexpr explicit operator bool() const noexcept { return Owner!=nullptr && Resolve!=nullptr; }
 };
 
+/// <summary>
+/// Fixed composition-owned resolver from a semantic DeviceIdentifier to an opaque Adapter route token.
+/// </summary>
+/// <remarks>
+/// This is intentionally distinct from the lower-transport route binding. Family APIs address semantic devices while the
+/// lower Radio transport addresses provider/peer handles. A composition may map both to the same finite peer table, but
+/// generic code must never pack, hash, truncate, or otherwise derive an AdapterRouteToken from DeviceIdentifier bytes.
+/// </remarks>
+struct RadioAdapterSemanticRouteBinding final {
+    void* Owner=nullptr;
+    bool (*Resolve)(void*,System::DeviceIdentifier,Adapters::AdapterRouteToken&) noexcept=nullptr;
+    bool (*Validate)(void*) noexcept=nullptr;
+
+    constexpr explicit operator bool() const noexcept { return Owner&&Resolve&&Validate; }
+
+    bool TryResolve(System::DeviceIdentifier device,Adapters::AdapterRouteToken& route) const noexcept {
+        route={};
+        return *this && bool(device) && Resolve(Owner,device,route) && bool(route);
+    }
+
+    bool IsValid() const noexcept { return *this && Validate(Owner); }
+};
+
 } // namespace ESPressio::RadioAdapters
