@@ -77,3 +77,12 @@ jobs:
           -o radio_adapter_m1_test
       - name: Run bounded exact-M1 controller
         run: ./radio_adapter_m1_test
+      - name: Compile adversarial exact-M1 hardening contract
+        run: >-
+          g++ -std=c++17 -Wall -Wextra -Werror -fno-rtti
+          -IRadioAdapters/src -IAdapters/src -IPrimitive/src -IRadio/src -IEvent/src -ISystem/src
+          -ITask/src -ITask/tests -IThreads/src -ITiming/src -ITiming/tests/stubs -ISerializable/src -IUnits/src -IObservable/src
+          RadioAdapters/tests/radio_adapter_m1_hardening_test.cpp
+          -o radio_adapter_m1_hardening_test
+      - name: Run adversarial exact-M1 hardening contract
+        run: ./radio_adapter_m1_hardening_test
