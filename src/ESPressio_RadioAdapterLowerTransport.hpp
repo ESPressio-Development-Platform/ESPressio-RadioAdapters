@@ -9,9 +9,8 @@
 #include <mutex>
 
 #include <ESPressio_AdapterTransport.hpp>
+#include <ESPressio_RadioMonotonicClock.hpp>
 #include <ESPressio_RadioRuntime.hpp>
-#include <ESPressio_Synchronization.hpp>
-#include <ESPressio_SystemPlatformClock.hpp>
 
 #include "ESPressio_RadioAdapterEnvelope.hpp"
 #include "ESPressio_RadioAdapterM1.hpp"
@@ -82,7 +81,7 @@ class RadioAdapterLowerTransport final {
     RadioAdapterTransferPolicyBinding _policy{};
     RadioAdapterM1TransportBinding _m1{};
     std::array<std::uint8_t,TMaximumLogicalMessageBytes> _workspace{};
-    System::Synchronization::Mutex _workspaceMutex;
+    std::mutex _workspaceMutex;
     std::atomic<bool> _quiesced{false};
     std::atomic<std::uint64_t> _lifecycleGeneration{1};
 
@@ -107,7 +106,7 @@ class RadioAdapterLowerTransport final {
         if(!Radio::IsValidRadioServiceClass(radioService))
             return {Adapters::LowerTransportDisposition::PermanentlyRejected,0,false};
 
-        const auto now=System::Clock::Monotonic().NowNanoseconds();
+        const auto now=Radio::RadioMonotonicNowNanoseconds();
         Radio::RadioServiceProfile profile{};
         Radio::RadioTransferTiming timing{};
         if(!self._policy.Resolve(self._policy.Owner,family,protocol,policy,service,now,profile,timing)||
@@ -121,7 +120,7 @@ class RadioAdapterLowerTransport final {
                 return {Adapters::LowerTransportDisposition::ResourceUnavailable,0,false};
         }
 
-        std::unique_lock<System::Synchronization::Mutex> lock(self._workspaceMutex,std::try_to_lock);
+        std::unique_lock<std::mutex> lock(self._workspaceMutex,std::try_to_lock);
         if(!lock.owns_lock()){
             if(transportGeneration) self._m1.Cancel(self._m1.Owner,transportGeneration);
             return {Adapters::LowerTransportDisposition::TemporarilyUnavailable,0,false};
@@ -164,7 +163,7 @@ class RadioAdapterLowerTransport final {
     static void QuiesceThunk(void* owner) noexcept {
         auto& self=*static_cast<RadioAdapterLowerTransport*>(owner);
         if(self._quiesced.exchange(true,std::memory_order_acq_rel)) return;
-        std::lock_guard<System::Synchronization::Mutex> lock(self._workspaceMutex);
+        std::lock_guard<std::mutex> lock(self._workspaceMutex);
         if(self._m1&&self._m1.Quiesce) self._m1.Quiesce(self._m1.Owner);
     }
 
@@ -186,7 +185,7 @@ public:
     bool Restart(TRadioRuntime& radio) noexcept {
         if(!_quiesced.load(std::memory_order_acquire)||!radio.IsRunning()||!_routes||!_policy||
            !_routes.Validate(_routes.Owner)||!_policy.Validate(_policy.Owner)) return false;
-        std::lock_guard<System::Synchronization::Mutex> lock(_workspaceMutex);
+        std::lock_guard<std::mutex> lock(_workspaceMutex);
         if(!_quiesced.load(std::memory_order_relaxed)) return false;
         const auto current=_lifecycleGeneration.load(std::memory_order_relaxed);
         if(current==std::numeric_limits<std::uint64_t>::max()) return false;
