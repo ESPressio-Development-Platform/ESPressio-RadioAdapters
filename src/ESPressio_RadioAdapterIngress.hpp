@@ -9,7 +9,6 @@
 
 #include <ESPressio_RadioIngressRouter.hpp>
 #include <ESPressio_RadioReassembly.hpp>
-#include <ESPressio_Synchronization.hpp>
 
 #include "ESPressio_RadioAdapterBinding.hpp"
 #include "ESPressio_RadioAdapterEnvelope.hpp"
@@ -140,8 +139,8 @@ class RadioAdapterReassemblyIngress final : public Radio::IRadioReassemblyReadyS
     RadioAdapterProvenanceBinding _provenance{};
     RadioAdapterM1ReceiptBinding _m1{};
     std::array<PendingReceipt,TMaximumPendingReceipts> _pendingReceipts{};
-    System::Synchronization::Mutex _receiptMutex;
-    System::Synchronization::Mutex _lifecycleMutex;
+    std::mutex _receiptMutex;
+    std::mutex _lifecycleMutex;
     std::atomic<bool> _quiesced{false};
     std::atomic<std::uint64_t> _lifecycleGeneration{1};
     std::atomic<std::uint64_t> _accepted{0};
@@ -165,14 +164,14 @@ class RadioAdapterReassemblyIngress final : public Radio::IRadioReassemblyReadyS
     }
 
     void ClearAllPending() noexcept {
-        std::lock_guard<System::Synchronization::Mutex> lock(_receiptMutex);
+        std::lock_guard<std::mutex> lock(_receiptMutex);
         for(auto& pending:_pendingReceipts) if(pending.Occupied) ClearPending(pending);
     }
 
     bool ReservePending(const Radio::RadioReassemblyRecord& record,std::uint64_t& token) noexcept {
         token=0;
         if(_quiesced.load(std::memory_order_acquire)) return false;
-        std::unique_lock<System::Synchronization::Mutex> lock(_receiptMutex,std::try_to_lock);
+        std::unique_lock<std::mutex> lock(_receiptMutex,std::try_to_lock);
         if(!lock.owns_lock()||_quiesced.load(std::memory_order_relaxed)) return false;
         for(std::size_t i=0;i<_pendingReceipts.size();++i){
             auto& pending=_pendingReceipts[i];if(pending.Occupied) continue;
@@ -188,7 +187,7 @@ class RadioAdapterReassemblyIngress final : public Radio::IRadioReassemblyReadyS
     }
 
     bool ReleasePending(std::uint64_t token,PendingReceipt& output) noexcept {
-        std::lock_guard<System::Synchronization::Mutex> lock(_receiptMutex);
+        std::lock_guard<std::mutex> lock(_receiptMutex);
         std::size_t slot=0;std::uint64_t generation=0;
         if(!DecodeReceiptToken(token,slot,generation)) return false;
         auto& pending=_pendingReceipts[slot];
@@ -236,14 +235,14 @@ public:
     /// </summary>
     void Quiesce() noexcept {
         if(_quiesced.exchange(true,std::memory_order_acq_rel)) return;
-        std::lock_guard<System::Synchronization::Mutex> lifecycleLock(_lifecycleMutex);
+        std::lock_guard<std::mutex> lifecycleLock(_lifecycleMutex);
         ClearAllPending();
     }
 
     /// <summary>Rebinds a replacement A2 runtime and advances the non-wrapping ingress lifecycle generation.</summary>
     bool Restart(TAdapterRuntime& runtime) noexcept {
         if(!_quiesced.load(std::memory_order_acquire)) return false;
-        std::lock_guard<System::Synchronization::Mutex> lifecycleLock(_lifecycleMutex);
+        std::lock_guard<std::mutex> lifecycleLock(_lifecycleMutex);
         if(!_quiesced.load(std::memory_order_relaxed)) return false;
         const auto current=_lifecycleGeneration.load(std::memory_order_relaxed);
         if(current==std::numeric_limits<std::uint64_t>::max()) return false;
@@ -262,7 +261,7 @@ public:
 
     void RadioReassemblyReady(Radio::IRadio& provider,const Radio::RadioAddress& source,
         Radio::RadioTransferId transferId,Radio::RadioServiceClass service) noexcept override {
-        std::lock_guard<System::Synchronization::Mutex> lifecycleLock(_lifecycleMutex);
+        std::lock_guard<std::mutex> lifecycleLock(_lifecycleMutex);
         Radio::RadioCompletedReassembly completed{};
         const auto taken=_reassembly->TakeCompleteTrusted(provider,source,transferId,completed);
         if(taken!=Radio::RadioReassemblyStatus::Complete||!completed){_rejected.fetch_add(1,std::memory_order_relaxed);return;}
