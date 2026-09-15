@@ -9,9 +9,8 @@
 
 #include <ESPressio_AdapterTransport.hpp>
 #include <ESPressio_PrimitiveAdmission.hpp>
+#include <ESPressio_RadioMonotonicClock.hpp>
 #include <ESPressio_RadioRuntime.hpp>
-#include <ESPressio_Synchronization.hpp>
-#include <ESPressio_SystemPlatformClock.hpp>
 
 #include "ESPressio_RadioAdapterEnvelope.hpp"
 
@@ -150,7 +149,7 @@ class RadioAdapterM1Controller final : public Radio::IRadioRuntimeTransferResult
     Radio::IRadioRuntimeTransferResultSink* _downstream=nullptr;
     void* _completionOwner=nullptr;
     Adapters::AdapterSubmissionDisposition (*_complete)(void*,const Adapters::LowerTransportCompletion&) noexcept=nullptr;
-    mutable System::Synchronization::Mutex _mutex;
+    mutable std::mutex _mutex;
     std::atomic<bool> _active{false};
     std::uint64_t _lifecycleGeneration=0;
     std::atomic<std::uint64_t> _staleLifecycleSignals{0};
@@ -202,7 +201,7 @@ class RadioAdapterM1Controller final : public Radio::IRadioRuntimeTransferResult
 
     static bool IsReservedThunk(void* owner,Radio::RadioContentionDomainId domain,Radio::RadioTransferId id) noexcept {
         auto& self=*static_cast<RadioAdapterM1Controller*>(owner);
-        std::unique_lock<System::Synchronization::Mutex> lock(self._mutex,std::try_to_lock);
+        std::unique_lock<std::mutex> lock(self._mutex,std::try_to_lock);
         if(!lock.owns_lock()) return true;
         if(self.IsRecentTransferIdLocked(domain,id)) return true;
         for(const auto& attempt:self._attempts)
@@ -213,7 +212,7 @@ class RadioAdapterM1Controller final : public Radio::IRadioRuntimeTransferResult
     static bool ReserveIssuedThunk(void* owner,Radio::RadioContentionDomainId domain,
         std::uint64_t correlation,Radio::RadioTransferId id) noexcept {
         auto& self=*static_cast<RadioAdapterM1Controller*>(owner);
-        std::unique_lock<System::Synchronization::Mutex> lock(self._mutex,std::try_to_lock);
+        std::unique_lock<std::mutex> lock(self._mutex,std::try_to_lock);
         if(!lock.owns_lock()||!self._active.load(std::memory_order_acquire)||!domain||id==0) return false;
         std::size_t slot=0;std::uint64_t generation=0;
         if(!DecodeToken(correlation,slot,generation)) return false;
@@ -235,7 +234,7 @@ class RadioAdapterM1Controller final : public Radio::IRadioRuntimeTransferResult
     static void ReleaseIssuedThunk(void* owner,Radio::RadioContentionDomainId domain,
         std::uint64_t correlation,Radio::RadioTransferId id) noexcept {
         auto& self=*static_cast<RadioAdapterM1Controller*>(owner);
-        std::unique_lock<System::Synchronization::Mutex> lock(self._mutex,std::try_to_lock);
+        std::unique_lock<std::mutex> lock(self._mutex,std::try_to_lock);
         if(!lock.owns_lock()) return;
         self.RememberTransferIdLocked(domain,id);
         std::size_t slot=0;std::uint64_t generation=0;
@@ -283,7 +282,7 @@ public:
 
     /// <summary>Rebinds a replacement Radio runtime only while the previous transport lifecycle is quiesced.</summary>
     bool RebindRadioRuntime(TRadioRuntime& radio) noexcept {
-        std::lock_guard<System::Synchronization::Mutex> lock(_mutex);
+        std::lock_guard<std::mutex> lock(_mutex);
         if(_active.load(std::memory_order_acquire)) return false;
         _radio=&radio;
         return true;
@@ -295,7 +294,7 @@ public:
     /// </summary>
     template<class TAdapterRuntime>
     bool BindAdapterRuntime(TAdapterRuntime& runtime) noexcept {
-        std::lock_guard<System::Synchronization::Mutex> lock(_mutex);
+        std::lock_guard<std::mutex> lock(_mutex);
         if(_active.load(std::memory_order_acquire)||_lifecycleGeneration==std::numeric_limits<std::uint64_t>::max())
             return false;
         ++_lifecycleGeneration;
@@ -311,7 +310,7 @@ public:
     /// <summary>Ends the current lifecycle, retaining only bounded recent transfer-id exclusion history.</summary>
     void Quiesce() noexcept {
         _active.store(false,std::memory_order_release);
-        std::lock_guard<System::Synchronization::Mutex> lock(_mutex);
+        std::lock_guard<std::mutex> lock(_mutex);
         for(auto& attempt:_attempts)
             if(attempt.Occupied) ClearAttemptLocked(attempt);
         _completionOwner=nullptr;
@@ -321,7 +320,7 @@ public:
     bool IsActive() const noexcept { return _active.load(std::memory_order_acquire); }
 
     std::uint64_t LifecycleGeneration() const noexcept {
-        std::lock_guard<System::Synchronization::Mutex> lock(_mutex);
+        std::lock_guard<std::mutex> lock(_mutex);
         return _lifecycleGeneration;
     }
 
@@ -349,7 +348,7 @@ public:
 
     bool Reserve(Adapters::AdapterRecordIdentity record,Adapters::AdapterRouteToken route,std::uint64_t& token) noexcept {
         token=0;if(!record||!route||!_active.load(std::memory_order_acquire)) return false;
-        std::unique_lock<System::Synchronization::Mutex> lock(_mutex,std::try_to_lock);
+        std::unique_lock<std::mutex> lock(_mutex,std::try_to_lock);
         if(!lock.owns_lock()||!_active.load(std::memory_order_relaxed)) return false;
         for(std::size_t i=0;i<_attempts.size();++i){
             auto& attempt=_attempts[i];
@@ -363,7 +362,7 @@ public:
     }
 
     void Cancel(std::uint64_t token) noexcept {
-        std::lock_guard<System::Synchronization::Mutex> lock(_mutex);
+        std::lock_guard<std::mutex> lock(_mutex);
         std::size_t slot=0;std::uint64_t generation=0;
         if(!DecodeToken(token,slot,generation)) return;
         auto& attempt=_attempts[slot];
@@ -372,7 +371,7 @@ public:
 
     void CancelRecord(Adapters::AdapterRecordIdentity record) noexcept {
         if(!record) return;
-        std::lock_guard<System::Synchronization::Mutex> lock(_mutex);
+        std::lock_guard<std::mutex> lock(_mutex);
         for(auto& attempt:_attempts){
             if(attempt.Occupied&&attempt.Record==record){
                 ClearAttemptLocked(attempt);
@@ -388,7 +387,7 @@ public:
         }
         bool wake=false;
         {
-            std::lock_guard<System::Synchronization::Mutex> lock(_mutex);
+            std::lock_guard<std::mutex> lock(_mutex);
             if(!_active.load(std::memory_order_relaxed)){
                 _staleLifecycleSignals.fetch_add(1,std::memory_order_relaxed);
                 return;
@@ -414,7 +413,7 @@ public:
         }
         bool wake=false;
         {
-            std::lock_guard<System::Synchronization::Mutex> lock(_mutex);
+            std::lock_guard<std::mutex> lock(_mutex);
             if(!_active.load(std::memory_order_relaxed)) return false;
             for(auto& attempt:_attempts){
                 if(!attempt.Occupied||!attempt.TransferAssigned||attempt.Domain!=domain||attempt.TransferId!=transferId) continue;
@@ -433,7 +432,7 @@ public:
         if(!_active.load(std::memory_order_acquire)||_radio==nullptr||!_receiptPolicy||
            !source.IsValid()||source.IsBroadcast()||transferId==0) return false;
         Radio::RadioServiceProfile profile{};Radio::RadioTransferTiming timing{};
-        const auto now=System::Clock::Monotonic().NowNanoseconds();
+        const auto now=Radio::RadioMonotonicNowNanoseconds();
         if(!_receiptPolicy.Resolve(_receiptPolicy.Owner,inboundService,now,profile,timing)||
            !profile.IsValid()||!timing.IsValidFor(profile)) return false;
         std::array<std::uint8_t,DirectRadioM1ReceiptBytes> bytes{};
@@ -453,7 +452,7 @@ public:
         std::size_t selected=_attempts.size();
         Adapters::LowerTransportCompletion completion{};
         {
-            std::lock_guard<System::Synchronization::Mutex> lock(_mutex);
+            std::lock_guard<std::mutex> lock(_mutex);
             if(!_active.load(std::memory_order_relaxed)) return Adapters::AdapterSubmissionDisposition::NotRunning;
             for(std::size_t i=0;i<_attempts.size();++i){
                 const auto& attempt=_attempts[i];
@@ -471,7 +470,7 @@ public:
         const auto result=_complete(_completionOwner,completion);
         if(result==Adapters::AdapterSubmissionDisposition::Busy){SignalWake();return result;}
         {
-            std::lock_guard<System::Synchronization::Mutex> lock(_mutex);
+            std::lock_guard<std::mutex> lock(_mutex);
             auto& attempt=_attempts[selected];
             if(attempt.Occupied&&attempt.Generation==(completion.TransportGeneration>>16u)&&attempt.PendingCompletion)
                 ClearAttemptLocked(attempt);
@@ -480,7 +479,7 @@ public:
     }
 
     std::size_t OutstandingAttempts() const noexcept {
-        std::lock_guard<System::Synchronization::Mutex> lock(_mutex);
+        std::lock_guard<std::mutex> lock(_mutex);
         std::size_t count=0;for(const auto& attempt:_attempts)if(attempt.Occupied)++count;return count;
     }
 };
